@@ -64,6 +64,8 @@ func main() {
 	relayConfig := &relay.Config{
 		ListenAddr:       cfg.ListenAddr,
 		PSK:              cfg.PSK,
+		Users:            cfg.Users,
+		UserIDs:          cfg.UserIDs,
 		TagLen:           cfg.TagLen,
 		IntentFile:       cfg.IntentFile,
 		EnforceFile:      cfg.EnforceFile,

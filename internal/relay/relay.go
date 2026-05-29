@@ -17,7 +17,6 @@
 package relay
 
 import (
-	"crypto/hmac"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -75,8 +74,8 @@ type Server struct {
 	config *Config
 
 	// Components
-	whitelistMgr  *whitelist.Manager
-	authenticator *auth.Authenticator
+	whitelistMgr *whitelist.Manager
+	userStore    *auth.UserStore
 
 	// Statistics
 	stats *Stats
@@ -98,8 +97,19 @@ type Config struct {
 	// ListenAddr is the address to listen on.
 	ListenAddr string
 
-	// PSK is the pre-shared key (hex-encoded).
+	// PSK is the pre-shared key (hex-encoded). For single-user mode only.
+	// If Users is non-empty, PSK is ignored.
 	PSK string
+
+	// Users maps user identifiers (e.g. UUIDs) to their hex-encoded PSKs.
+	// When set, multi-user authentication with key-hint lookup is enabled.
+	Users map[string]string
+
+	// UserIDs is a list of user identifiers (e.g. UUIDs) for multi-user mode.
+	// Each user's PSK is derived as PSK = SHA256(userID).
+	// This is the recommended field — no need to specify separate PSK values.
+	// If both Users and UserIDs are set, Users takes precedence.
+	UserIDs []string
 
 	// TagLen is the authentication tag length.
 	TagLen int
@@ -167,18 +177,29 @@ func NewServer(config *Config, logger *slog.Logger) (*Server, error) {
 		whitelistMgr = whitelist.NewManager(whitelist.NewIntentLayer(), whitelist.NewEnforceLayer())
 	}
 
-	// Create authenticator
-	authenticator, err := auth.NewAuthenticatorFromHex(config.PSK, config.TagLen)
+	// Create user store for authentication.
+	// Priority: Users (explicit PSK map) > UserIDs (UUID-derived PSK) > PSK (single-user).
+	var userStore *auth.UserStore
+	switch {
+	case len(config.Users) > 0:
+		userStore, err = auth.NewUserStore(config.Users, config.TagLen)
+	case len(config.UserIDs) > 0:
+		userStore, err = auth.NewUserStoreFromIDs(config.UserIDs, config.TagLen)
+	case config.PSK != "":
+		userStore, err = auth.NewUserStore(map[string]string{"default": config.PSK}, config.TagLen)
+	default:
+		return nil, fmt.Errorf("relay: one of PSK, Users, or UserIDs must be configured")
+	}
 	if err != nil {
-		return nil, fmt.Errorf("relay: failed to create authenticator: %w", err)
+		return nil, fmt.Errorf("relay: failed to create user store: %w", err)
 	}
 
 	return &Server{
-		config:        config,
-		whitelistMgr:  whitelistMgr,
-		authenticator: authenticator,
-		stats:         &Stats{},
-		logger:        logger,
+		config:       config,
+		whitelistMgr: whitelistMgr,
+		userStore:    userStore,
+		stats:        &Stats{},
+		logger:       logger,
 	}, nil
 }
 
@@ -313,8 +334,9 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		return
 	}
 
-	// Step 6: Pre-swap heuristic check
-	expectedAuthRecordMin := 5 + auth.DefaultTagLen + len(h2engine.H2ConnectionPreface)
+	// Step 6: Pre-swap heuristic check.
+	// Auth frame is now: [key_hint (4)] [tag (tagLen)], so +4 for hint.
+	expectedAuthRecordMin := 5 + 4 + auth.DefaultTagLen + len(h2engine.H2ConnectionPreface)
 	if len(firstAppData) < expectedAuthRecordMin {
 		logger.Debug("first app data too short for Chimney, forwarding transparently",
 			"record_len", len(firstAppData),
@@ -323,22 +345,12 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		return
 	}
 
-	// Step 7: Compute expected auth tag
-	expectedTag, err := s.authenticator.GenerateTag(serverRandom, clientRandom)
-	if err != nil {
-		logger.Debug("failed to generate expected tag", "error", err)
-		s.forwardToSite(clientConn, siteConn, firstAppData, logger)
-		return
-	}
-
-	// Step 8: Attempt swap — siteConn kept alive until auth verified.
-	// performSwap does a non-destructive pre-check on firstAppData before
-	// committing to the swap. If the pre-check fails, firstAppData is
-	// forwarded to the real site transparently.
+	// Step 7: Attempt swap. The auth tag is verified inside performSwap
+	// after extracting the key_hint from the auth frame.
 	s.stats.AuthenticatedSwaps.Add(1)
 	logger.Info("attempting swap")
 
-	if err := s.performSwap(clientConn, siteConn, sni, serverRandom, clientRandom, expectedTag, firstAppData, logger); err != nil {
+	if err := s.performSwap(clientConn, siteConn, sni, serverRandom, clientRandom, firstAppData, logger); err != nil {
 		logger.Debug("swap failed", "error", err)
 		s.stats.AuthFailures.Add(1)
 		// performSwap's pre-check failed without consuming data from
@@ -532,14 +544,6 @@ func (s *Server) relayHandshake(clientConn, siteConn net.Conn, logger *slog.Logg
 	}
 }
 
-// extractAuthTag computes the expected auth tag from handshake parameters.
-func (s *Server) extractAuthTag(serverRandom, clientRandom []byte) ([]byte, error) {
-	if len(serverRandom) != 32 || len(clientRandom) != 32 {
-		return nil, errors.New("invalid random length for tag computation")
-	}
-	return s.authenticator.GenerateTag(serverRandom, clientRandom)
-}
-
 // forwardToSite continues forwarding traffic to the real site.
 func (s *Server) forwardToSite(clientConn, siteConn net.Conn, bufferedData []byte, logger *slog.Logger) {
 	if len(bufferedData) > 0 {
@@ -596,7 +600,7 @@ func (c *prependConn) remainingPrefix() []byte {
 }
 
 // performSwap performs the swap operation after successful auth.
-func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRandom, clientRandom, expectedTag, firstAppData []byte, logger *slog.Logger) error {
+func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRandom, clientRandom, firstAppData []byte, logger *slog.Logger) error {
 	// siteConn is kept alive until auth verification succeeds.
 	// If we return an error before the "swap complete" log, the caller
 	// can fall back to transparent forwarding.
@@ -738,12 +742,34 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 	}
 
 	if fh.Type == h2engine.FrameData {
-		tagFromClient := payload[:min(len(payload), len(expectedTag))]
-		if !hmac.Equal(tagFromClient, expectedTag) {
-			logger.Debug("post-swap auth tag mismatch")
+		tagLen := s.userStore.TagLen()
+		if len(payload) < 4+tagLen {
+			logger.Debug("auth frame too short", "got", len(payload), "need", 4+tagLen)
 			return ErrAuthFailed
 		}
-		logger.Debug("post-swap auth verified successfully")
+
+		hint, err := auth.ExtractKeyHint(payload)
+		if err != nil {
+			logger.Debug("failed to extract key hint", "error", err)
+			return ErrAuthFailed
+		}
+
+		tagFromClient, err := auth.ExtractTagFromHintFrame(payload, tagLen)
+		if err != nil {
+			logger.Debug("failed to extract tag from hint frame", "error", err)
+			return ErrAuthFailed
+		}
+
+		ok, err := s.userStore.VerifyTag(hint, serverRandom, clientRandom, tagFromClient)
+		if err != nil {
+			logger.Debug("auth verification error", "error", err)
+			return ErrAuthFailed
+		}
+		if !ok {
+			logger.Debug("post-swap auth tag mismatch", "hint", fmt.Sprintf("%x", hint))
+			return ErrAuthFailed
+		}
+		logger.Debug("post-swap auth verified successfully", "hint", fmt.Sprintf("%x", hint))
 	} else {
 		logger.Debug("expected DATA frame for auth, got type", "type", fh.Type)
 		return ErrAuthFailed

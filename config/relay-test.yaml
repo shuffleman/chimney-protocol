@@ -1,6 +1,10 @@
 listen_addr: ":443"
-psk: "8be4ef9c3f07e6333bee585d9222f09dc2f13a80af4884b68df7345fb6d101a5"
 tag_len: 16
+
+# 多用户 UUID 认证
+user_ids:
+  - "550e8400-e29b-41d4-a716-446655440000"
+
 intent_file: "config/intent.yaml"
 enforce_file: "config/enforce.yaml"
 cloud_region: "us-east-1"

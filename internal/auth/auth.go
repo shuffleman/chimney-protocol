@@ -365,3 +365,134 @@ func (rc *RecordBytesCollector) Bytes() []byte {
 func (rc *RecordBytesCollector) Reset() {
 	rc.buf = rc.buf[:0]
 }
+
+// UserEntry associates a user identifier with a pre-derived key deriver.
+type UserEntry struct {
+	UserID  string
+	Deriver *keyderiv.Deriver
+}
+
+// UserStore manages authentication for multiple users, each identified by a
+// 4-byte hint derived from their user ID. The relay uses the hint from the
+// auth frame to look up the correct PSK for tag verification.
+type UserStore struct {
+	byHint map[[4]byte]*UserEntry
+	tagLen int
+}
+
+// NewUserStore creates a UserStore from a map of userID → pskHex.
+// The key hint is computed as SHA256(userID)[:4].
+func NewUserStore(users map[string]string, tagLen int) (*UserStore, error) {
+	if tagLen < MinTagLen || tagLen > MaxTagLen {
+		return nil, fmt.Errorf("%w: %d", ErrInvalidTagLen, tagLen)
+	}
+	if len(users) == 0 {
+		return nil, errors.New("auth: at least one user is required")
+	}
+
+	store := &UserStore{
+		byHint: make(map[[4]byte]*UserEntry, len(users)),
+		tagLen: tagLen,
+	}
+
+	for userID, pskHex := range users {
+		psk, err := hex.DecodeString(pskHex)
+		if err != nil {
+			return nil, fmt.Errorf("auth: invalid PSK for user %q: %w", userID, err)
+		}
+		hint := keyderiv.ComputeKeyHint(userID)
+		if _, exists := store.byHint[hint]; exists {
+			return nil, fmt.Errorf("auth: key hint collision for user %q (hint %x already taken)", userID, hint)
+		}
+		store.byHint[hint] = &UserEntry{
+			UserID:  userID,
+			Deriver: keyderiv.NewDeriver(psk),
+		}
+	}
+
+	return store, nil
+}
+
+// DerivePSKFromID derives a 256-bit PSK from a user identifier.
+// PSK = SHA256(userID). This allows relay deployment with only a UUID list,
+// since the same derivation happens on the client side.
+func DerivePSKFromID(userID string) []byte {
+	h := sha256.Sum256([]byte(userID))
+	return h[:]
+}
+
+// NewUserStoreFromIDs creates a UserStore from a list of user identifiers.
+// Each user's PSK is derived as PSK = SHA256(userID).
+// This is the recommended constructor for multi-user deployments where
+// UUIDs serve as both identifier and key material.
+func NewUserStoreFromIDs(userIDs []string, tagLen int) (*UserStore, error) {
+	users := make(map[string]string, len(userIDs))
+	for _, id := range userIDs {
+		users[id] = hex.EncodeToString(DerivePSKFromID(id))
+	}
+	return NewUserStore(users, tagLen)
+}
+
+// KeyHint returns the 4-byte hint for a given user identifier.
+func (s *UserStore) KeyHint(userID string) [4]byte {
+	return keyderiv.ComputeKeyHint(userID)
+}
+
+// TagLen returns the configured tag length.
+func (s *UserStore) TagLen() int {
+	return s.tagLen
+}
+
+// lookup returns the entry for a given hint, or nil.
+func (s *UserStore) lookup(hint [4]byte) *UserEntry {
+	return s.byHint[hint]
+}
+
+// GenerateTag computes the auth tag for a user identified by hint.
+func (s *UserStore) GenerateTag(hint [4]byte, serverRandom, recordBytes []byte) ([]byte, error) {
+	entry := s.lookup(hint)
+	if entry == nil {
+		return nil, fmt.Errorf("auth: unknown key hint %x", hint)
+	}
+	if len(serverRandom) != 32 {
+		return nil, ErrServerRandomLength
+	}
+	if len(recordBytes) == 0 {
+		return nil, ErrRecordBytesEmpty
+	}
+	return entry.Deriver.AuthTag(serverRandom, recordBytes, s.tagLen)
+}
+
+// VerifyTag verifies an auth tag for a user identified by hint.
+func (s *UserStore) VerifyTag(hint [4]byte, serverRandom, recordBytes, tag []byte) (bool, error) {
+	entry := s.lookup(hint)
+	if entry == nil {
+		return false, fmt.Errorf("auth: unknown key hint %x", hint)
+	}
+	if len(tag) != s.tagLen {
+		return false, fmt.Errorf("auth: tag length mismatch: got %d, want %d", len(tag), s.tagLen)
+	}
+	return entry.Deriver.VerifyAuthTag(serverRandom, recordBytes, tag)
+}
+
+// ExtractKeyHint extracts the 4-byte key hint from the auth frame payload.
+// The hint is the first 4 bytes of the payload.
+func ExtractKeyHint(payload []byte) ([4]byte, error) {
+	var hint [4]byte
+	if len(payload) < 4 {
+		return hint, errors.New("auth: payload too short for key hint (need 4 bytes)")
+	}
+	copy(hint[:], payload[:4])
+	return hint, nil
+}
+
+// ExtractTagFromHintFrame extracts the auth tag from a payload that includes
+// the 4-byte key hint prefix. Returns the tag bytes after the hint.
+func ExtractTagFromHintFrame(payload []byte, tagLen int) ([]byte, error) {
+	if len(payload) < 4+tagLen {
+		return nil, fmt.Errorf("auth: payload too short for hint frame (got %d, need %d)", len(payload), 4+tagLen)
+	}
+	tag := make([]byte, tagLen)
+	copy(tag, payload[4:4+tagLen])
+	return tag, nil
+}

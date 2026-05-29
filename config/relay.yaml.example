@@ -4,9 +4,22 @@
 # Listen address for incoming connections
 listen_addr: ":443"
 
-# Pre-shared key (hex-encoded, 64 characters = 256 bits)
-# Generate with: openssl rand -hex 32
-psk: "YOUR_PSK_HERE"
+# ── Authentication Mode (pick one) ──────────────────────
+#
+# Mode A (recommended): UUID list — PSK is derived automatically.
+#   PSK = SHA256(UUID), no separate key needed.
+#   Client only needs to know its UUID.
+user_ids:
+  - "your-uuid-here"
+
+# Mode B: explicit userID → PSK mapping for custom key material.
+# users:
+#   "user1": "hex-psk-for-user1"
+#   "user2": "hex-psk-for-user2"
+
+# Mode C: single PSK (backward-compatible, single-user).
+# psk: "YOUR_HEX_PSK_HERE"
+# ────────────────────────────────────────────────────────
 
 # Authentication tag length (8-32 bytes, 16 recommended)
 tag_len: 16

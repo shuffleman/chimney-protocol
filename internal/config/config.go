@@ -15,7 +15,17 @@ type RelayConfig struct {
 	ListenAddr string `yaml:"listen_addr"`
 
 	// PSK is the pre-shared key (hex-encoded string).
-	PSK string `yaml:"psk"`
+	// Optional if Users or UserIDs is set.
+	PSK string `yaml:"psk,omitempty"`
+
+	// Users maps user identifiers to their hex-encoded PSKs.
+	// Optional if PSK or UserIDs is set.
+	Users map[string]string `yaml:"users,omitempty"`
+
+	// UserIDs is a list of user identifiers (e.g. UUIDs) for multi-user mode.
+	// Each user's PSK is derived as SHA256(userID). This is the recommended field.
+	// Optional if PSK or Users is set.
+	UserIDs []string `yaml:"user_ids,omitempty"`
 
 	// TagLen is the authentication tag length in bytes (8-16).
 	TagLen int `yaml:"tag_len"`
@@ -68,7 +78,12 @@ type ClientConfig struct {
 	DestAddr string `yaml:"dest_addr"`
 
 	// PSK is the pre-shared key (hex-encoded string).
-	PSK string `yaml:"psk"`
+	// Optional if UserID is set.
+	PSK string `yaml:"psk,omitempty"`
+
+	// UserID is the user identifier (e.g. UUID) for multi-user relay.
+	// If set, PSK is derived as SHA256(UserID) when PSK is empty.
+	UserID string `yaml:"user_id,omitempty"`
 
 	// TagLen is the authentication tag length.
 	TagLen int `yaml:"tag_len"`
@@ -117,8 +132,8 @@ func (c *RelayConfig) Validate() error {
 	if c.ListenAddr == "" {
 		return fmt.Errorf("config: listen_addr is required")
 	}
-	if c.PSK == "" {
-		return fmt.Errorf("config: psk is required")
+	if c.PSK == "" && len(c.Users) == 0 && len(c.UserIDs) == 0 {
+		return fmt.Errorf("config: one of psk, users, or user_ids is required")
 	}
 	if c.TagLen < 8 || c.TagLen > 32 {
 		return fmt.Errorf("config: tag_len must be between 8 and 32")
@@ -144,7 +159,9 @@ func (c *ClientConfig) Validate() error {
 		return fmt.Errorf("config: sni is required")
 	}
 	if c.PSK == "" {
-		return fmt.Errorf("config: psk is required")
+		if c.UserID == "" {
+			return fmt.Errorf("config: psk or user_id is required")
+		}
 	}
 	if c.TagLen < 8 || c.TagLen > 32 {
 		return fmt.Errorf("config: tag_len must be between 8 and 32")

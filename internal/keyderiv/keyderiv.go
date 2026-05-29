@@ -175,3 +175,13 @@ func (d *Deriver) VerifyAuthTag(serverRandom, recordBytes, tag []byte) (bool, er
 	}
 	return hmac.Equal(expected, tag), nil
 }
+
+// ComputeKeyHint returns a 4-byte hint derived from a user identifier.
+// The hint is SHA256(userID)[:4] and is used by the relay to look up
+// the correct PSK for multi-user authentication.
+func ComputeKeyHint(userID string) [4]byte {
+	h := sha256.Sum256([]byte(userID))
+	var hint [4]byte
+	copy(hint[:], h[:4])
+	return hint
+}

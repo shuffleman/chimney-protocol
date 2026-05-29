@@ -20,6 +20,7 @@ package chimney
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -56,6 +57,11 @@ type Config struct {
 
 	// PSK is the pre-shared key (64 hex chars = 256 bits). Required.
 	PSK string
+
+	// UserID is the user identifier (e.g. UUID) for multi-user relay deployments.
+	// It is hashed to a 4-byte key hint sent alongside the auth tag.
+	// If empty, defaults to "default" (single-user mode).
+	UserID string
 
 	// TagLen is the auth tag length in bytes (default: 16).
 	TagLen int
@@ -217,6 +223,14 @@ func NewDialer(config Config) (*Dialer, error) {
 		config.HandshakeTimeout = DefaultHandshakeTimeout
 	}
 
+	// Derive PSK from UserID if no explicit PSK is given.
+	if config.PSK == "" {
+		if config.UserID == "" {
+			config.UserID = "default"
+		}
+		config.PSK = hex.EncodeToString(auth.DerivePSKFromID(config.UserID))
+	}
+
 	// Step 1: TCP connect
 	rawConn, err := net.DialTimeout("tcp", config.RelayAddr, config.ConnectTimeout)
 	if err != nil {
@@ -263,6 +277,14 @@ func NewDialer(config Config) (*Dialer, error) {
 		uConn.Close()
 		return nil, fmt.Errorf("chimney: auth tag: %w", err)
 	}
+
+	// Compute key hint for multi-user auth.
+	// If no UserID is set, default to "default" for single-user compatibility.
+	userID := config.UserID
+	if userID == "" {
+		userID = "default"
+	}
+	keyHint := keyderiv.ComputeKeyHint(userID)
 
 	sendKey, recvKey, err := deriver.DeriveDirectionalKeys(serverRandom, clientRandom)
 	if err != nil {
@@ -349,9 +371,13 @@ func NewDialer(config Config) (*Dialer, error) {
 		return nil, fmt.Errorf("chimney: expected SETTINGS ACK, got type 0x%x flags 0x%x", fh.Type, fh.Flags)
 	}
 
-	// Step 9: Send auth tag
+	// Step 9: Send auth tag with key hint prefix.
+	// Extended auth frame format: [key_hint (4 bytes)] [tag (tagLen bytes)]
 	authStreamID := h2Eng.OpenStream()
-	tagFrame := h2engine.DataFrame(authStreamID, 0, tag)
+	authPayload := make([]byte, 4+len(tag))
+	copy(authPayload, keyHint[:])
+	copy(authPayload[4:], tag)
+	tagFrame := h2engine.DataFrame(authStreamID, 0, authPayload)
 	if err := recWriter.WriteRecord(tagFrame); err != nil {
 		uConn.Close()
 		return nil, fmt.Errorf("chimney: send auth tag: %w", err)

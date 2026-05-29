@@ -52,11 +52,12 @@ func main() {
 		profileFile    = flag.String("profile", "", "Traffic profile JSON for padding (enables padding stream)")
 		paddingTarget  = flag.Int("padding-target", 0, "Override padding target size (0 = use profile distribution)")
 		dilutionFile   = flag.String("dilution", "", "Pre-recorded content blocks JSON for dilution stream")
+		userID         = flag.String("user-id", "", "User identifier (UUID) for multi-user relay (default: \"default\")")
 	)
 	flag.Parse()
 
-	if *relayAddr == "" || *sni == "" || *destAddr == "" || *pskHex == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s -relay <host:port> -sni <site> -dest <host:port> -psk <hex>\n", os.Args[0])
+	if *relayAddr == "" || *sni == "" || *destAddr == "" {
+		fmt.Fprintf(os.Stderr, "Usage: %s -relay <host:port> -sni <site> -dest <host:port> [-psk <hex> | -user-id <uuid>]\n", os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
@@ -102,11 +103,22 @@ func main() {
 		)
 	}
 
+	uid := *userID
+	if uid == "" {
+		uid = "default"
+	}
+
+	psk := *pskHex
+	if psk == "" {
+		psk = hex.EncodeToString(auth.DerivePSKFromID(uid))
+	}
+
 	client := &Client{
 		RelayAddr:     *relayAddr,
 		SNI:           *sni,
 		DestAddr:      *destAddr,
-		PSKHex:        *pskHex,
+		PSKHex:        psk,
+		UserID:        uid,
 		TagLen:        *tagLen,
 		ListenAddr:    *listenAddr,
 		Fingerprints:     fpRotator,
@@ -128,6 +140,7 @@ type Client struct {
 	SNI           string
 	DestAddr      string
 	PSKHex        string
+	UserID        string
 	TagLen        int
 	ListenAddr    string
 	Fingerprints     *FingerprintRotator
@@ -225,6 +238,9 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 		return nil, fmt.Errorf("compute auth tag: %w", err)
 	}
 
+	// Compute key hint for multi-user auth.
+	keyHint := keyderiv.ComputeKeyHint(c.UserID)
+
 	// Derive directional keys for client side
 	sendKey, recvKey, err := deriver.DeriveDirectionalKeys(serverRandom, clientRandom)
 	if err != nil {
@@ -308,15 +324,23 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 		return nil, fmt.Errorf("H2 handshake: %w", err)
 	}
 
-	// Step 9: Send auth tag as first DATA frame on stream 1
+	// Step 9: Send auth tag with key hint prefix.
+	// Extended format: [key_hint (4 bytes)] [tag (tagLen bytes)]
 	authStreamID := h2Eng.OpenStream()
-	tagFrame := h2engine.DataFrame(authStreamID, 0, tag)
+	authPayload := make([]byte, 4+len(tag))
+	copy(authPayload, keyHint[:])
+	copy(authPayload[4:], tag)
+	tagFrame := h2engine.DataFrame(authStreamID, 0, authPayload)
 	if err := recWriter.WriteRecord(tagFrame); err != nil {
 		uConn.Close()
 		return nil, fmt.Errorf("send auth tag frame: %w", err)
 	}
 
-	c.Logger.Debug("sent post-swap auth tag", "tag", hex.EncodeToString(tag), "stream", authStreamID)
+	c.Logger.Debug("sent post-swap auth tag",
+		"hint", hex.EncodeToString(keyHint[:]),
+		"tag", hex.EncodeToString(tag),
+		"stream", authStreamID,
+	)
 
 	// Step 10: Wait for relay's auth confirmation (empty DATA frame or SETTINGS ACK)
 	// The relay sends a new SETTINGS frame or just proceeds — if we get here
