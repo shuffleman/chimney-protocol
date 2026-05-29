@@ -1,0 +1,47 @@
+# Chimney Relay Server Configuration
+# Copy this file to relay.yaml and fill in your values.
+
+# Listen address for incoming connections
+listen_addr: ":443"
+
+# Pre-shared key (hex-encoded, 64 characters = 256 bits)
+# Generate with: openssl rand -hex 32
+psk: "YOUR_PSK_HERE"
+
+# Authentication tag length (8-32 bytes, 16 recommended)
+tag_len: 16
+
+# Intent whitelist file (allowed SNI values)
+intent_file: "config/intent.yaml"
+
+# Enforce CIDR whitelist file (allowed destination IPs)
+enforce_file: "config/enforce.yaml"
+
+# Cloud region for CIDR validation
+# Must match the region where the relay is hosted
+cloud_region: "us-east-1"
+
+# Fallback backend for non-authenticated traffic
+# If empty, connections are closed naturally on failure (recommended)
+default_backend: ""
+
+# TLS handshake relay timeout
+handshake_timeout: 10s
+
+# Auth record read timeout
+auth_read_timeout: 5s
+
+# Enable traffic profiling and pacing
+enable_profiling: true
+
+# Directory containing site profile files
+profile_dir: "profiles"
+
+# CIDR refresh interval from cloud providers
+cidr_refresh_interval: 24h
+
+# Log level: debug, info, warn, error
+log_level: "info"
+
+# Metrics endpoint address (optional, empty to disable)
+metrics_addr: ":8080"

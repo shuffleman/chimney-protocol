@@ -1,0 +1,57 @@
+# Docker Compose for Chimney
+# Copy this file to docker-compose.yml and customize as needed.
+
+version: '3.8'
+
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.relay
+    container_name: chimney-relay
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "8080:8080"  # Metrics/health endpoint
+    volumes:
+      - ./config:/app/config:ro
+      - ./profiles:/app/profiles:ro
+    environment:
+      - CHIMNEY_LOG_LEVEL=info
+    command: ["-config", "/app/config/relay.yaml"]
+    networks:
+      - chimney-net
+    # Security: run as non-root
+    user: "65534:65534"
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=10m
+
+  # Client service (optional — usually runs locally)
+  client:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.client
+    container_name: chimney-client
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1080:1080"  # SOCKS5 proxy
+    environment:
+      - CHIMNEY_RELAY=relay.example.com:443
+      - CHIMNEY_SNI=real-site.example.com
+      - CHIMNEY_PSK=${CHIMNEY_PSK}  # Set via .env file
+    command: [
+      "-relay", "${CHIMNEY_RELAY}",
+      "-sni", "${CHIMNEY_SNI}",
+      "-dest", "${CHIMNEY_DEST}",
+      "-psk", "${CHIMNEY_PSK}",
+      "-listen", "0.0.0.0:1080"
+    ]
+    networks:
+      - chimney-net
+    profiles:
+      - client  # Only start when explicitly requested
+
+networks:
+  chimney-net:
+    driver: bridge

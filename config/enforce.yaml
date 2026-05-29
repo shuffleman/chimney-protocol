@@ -1,0 +1,455 @@
+# Chimney Enforce Layer (Layer B) — Security Critical
+# These CIDR blocks define which destination IPs the relay is allowed to connect to.
+# The relay MUST reject any connection attempt to IPs outside these ranges.
+#
+# Source: AWS IP Ranges for us-east-1
+# https://ip-ranges.amazonaws.com/ip-ranges.json
+# Refresh: Run `chimney-relay -refresh-cidrs` to update from cloud provider APIs
+
+version: 1
+updated_at: 2026-05-29T00:00:00Z
+
+entries:
+  # === 测试用：允许所有 IP（生产环境必须删除） ===
+  - cidr: "0.0.0.0/0"
+    provider: "testing"
+    region: "any"
+    description: "TEST ONLY — 允许所有 IPv4"
+
+  # === 以下是 AWS us-east-1 真实 CIDR ===
+  # AWS us-east-1 IPv4 ranges (examples — use `aws ec2 describe-prefix-lists` for accurate data)
+  - cidr: "3.2.34.0/26"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 AMAZON"
+
+  - cidr: "3.2.35.0/24"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 AMAZON"
+
+  - cidr: "3.3.2.0/24"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 AMAZON"
+
+  - cidr: "3.3.28.0/22"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 AMAZON"
+
+  - cidr: "3.208.0.0/12"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 AMAZON"
+
+  - cidr: "3.224.0.0/12"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 AMAZON"
+
+  - cidr: "13.58.0.0/15"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "18.204.0.0/14"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "23.20.0.0/14"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "34.192.0.0/12"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "44.192.0.0/11"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "50.16.0.0/15"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "52.0.0.0/11"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2 (primary)"
+
+  - cidr: "54.80.0.0/13"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.88.0.0/14"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.92.0.0/16"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.144.0.0/14"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.152.0.0/16"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.156.0.0/14"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.160.0.0/13"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.172.0.0/15"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.174.0.0/15"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.196.0.0/15"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.198.0.0/16"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.204.0.0/15"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.208.0.0/15"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.210.0.0/15"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.221.0.0/16"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.224.0.0/15"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.226.0.0/15"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "54.242.0.0/15"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "63.32.0.0/14"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "67.202.0.0/18"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "72.44.32.0/19"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "75.101.128.0/17"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "96.127.0.0/17"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "107.20.0.0/14"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "174.129.0.0/16"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "184.72.64.0/18"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "184.72.128.0/17"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  - cidr: "184.73.0.0/16"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 EC2"
+
+  # AWS us-east-1 IPv6 ranges
+  - cidr: "2600:1f10:4000::/36"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f11::/36"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f12::/36"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f13::/36"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f14::/35"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f15::/32"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f16::/36"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f18:8000::/36"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f1b::/36"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f1c::/36"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f1e::/36"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f60::/32"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f68::/32"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f69::/32"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f96::/32"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1f98::/29"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ff0:4000::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ff1::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ff2::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ff3::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ff4::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ff5::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ff6::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ff7::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ff9:4000::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ffa:4000::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ffb::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ffc:4000::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ffd:8000::/36"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1ffe:4000::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:1fff:4000::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:f0f0:0:100::/56"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:f0f0:0:200::/56"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:f0f0:0:300::/56"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:f0f0:80::/48"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:f0f0:1000::/44"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:f0f0:4000::/44"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:f0f0:6000::/44"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2600:f0f0::/44"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2605:9cc0:1ff0::/56"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2605:9cc0:1ff0:500::/56"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2606:f40:800::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2606:f40:880::/40"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2606:f40::/39"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2620:107:3000::/44"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"
+
+  - cidr: "2620:107:300f::/48"
+    provider: "aws"
+    region: "us-east-1"
+    description: "AWS us-east-1 IPv6"

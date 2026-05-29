@@ -1,0 +1,29 @@
+# Chimney Client Configuration
+# Copy this file to client.yaml and fill in your values.
+
+# Relay server address (host:port)
+relay_addr: "relay.example.com:443"
+
+# SNI to use (must be in relay's whitelist)
+sni: "real-site.example.com"
+
+# Final destination address (host:port)
+dest_addr: "final-destination.com:443"
+
+# Pre-shared key (hex-encoded, must match relay's PSK)
+psk: "YOUR_PSK_HERE"
+
+# Authentication tag length (must match relay config)
+tag_len: 16
+
+# Local SOCKS5 proxy listen address
+listen_addr: "127.0.0.1:1080"
+
+# uTLS fingerprint to use (chrome, firefox, safari, edge)
+utls_fingerprint: "chrome"
+
+# Connection timeout
+connect_timeout: 10s
+
+# TLS handshake timeout
+handshake_timeout: 10s

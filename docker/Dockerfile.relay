@@ -1,0 +1,44 @@
+# Dockerfile for Chimney Relay Server
+FROM golang:1.23-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git make
+
+WORKDIR /build
+
+# Copy go module files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the relay binary
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o chimney-relay ./cmd/chimney-relay
+
+# Final stage
+FROM alpine:latest
+
+# Install ca-certificates for TLS
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /build/chimney-relay /app/
+
+# Copy default configs
+COPY --from=builder /build/config/ /app/config/
+
+# Create directory for profiles
+RUN mkdir -p /app/profiles
+
+# Expose the relay port
+EXPOSE 443
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["/app/chimney-relay"]
+CMD ["-config", "/app/config/relay.yaml"]

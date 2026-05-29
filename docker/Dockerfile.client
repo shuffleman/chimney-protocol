@@ -1,0 +1,33 @@
+# Dockerfile for Chimney Client
+FROM golang:1.23-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git make
+
+WORKDIR /build
+
+# Copy go module files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the client binary
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o chimney-client ./cmd/chimney-client
+
+# Final stage
+FROM alpine:latest
+
+# Install ca-certificates for TLS
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /build/chimney-client /app/
+
+# Expose the SOCKS5 proxy port
+EXPOSE 1080
+
+ENTRYPOINT ["/app/chimney-client"]

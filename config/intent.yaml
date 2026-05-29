@@ -1,0 +1,26 @@
+# Chimney Intent Whitelist (测试用)
+version: 1
+updated_at: 2026-05-29T00:00:00Z
+
+entries:
+  # cloudflare.com — 全球可访问, 支持 HTTP/2
+  cloudflare.com:
+    sni: cloudflare.com
+    description: "Cloudflare (测试借用站)"
+    settings_snapshot:
+      HEADER_TABLE_SIZE: 4096
+      ENABLE_PUSH: 0
+      MAX_CONCURRENT_STREAMS: 100
+      INITIAL_WINDOW_SIZE: 65535
+      MAX_FRAME_SIZE: 16384
+      MAX_HEADER_LIST_SIZE: 16384
+  www.apple.com:
+    sni: www,apple.comm
+    description: "www,apple.com (测试借用站)"
+    settings_snapshot:
+      HEADER_TABLE_SIZE: 4096
+      ENABLE_PUSH: 0
+      MAX_CONCURRENT_STREAMS: 100
+      INITIAL_WINDOW_SIZE: 65535
+      MAX_FRAME_SIZE: 16384
+      MAX_HEADER_LIST_SIZE: 16384

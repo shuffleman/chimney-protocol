@@ -1,0 +1,13 @@
+listen_addr: ":443"
+psk: "8be4ef9c3f07e6333bee585d9222f09dc2f13a80af4884b68df7345fb6d101a5"
+tag_len: 16
+intent_file: "config/intent.yaml"
+enforce_file: "config/enforce.yaml"
+cloud_region: "us-east-1"
+default_backend: ""
+handshake_timeout: 10s
+auth_read_timeout: 5s
+enable_profiling: false
+profile_dir: "profiles"
+log_level: "debug"
+metrics_addr: ":8081"

@@ -1,0 +1,50 @@
+# Binaries
+/build/
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.html
+coverage.out
+
+# Go specific
+/vendor/
+/go.sum.bak
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Configuration (may contain secrets)
+config/relay.yaml
+config/client.yaml
+!config/intent.yaml
+!config/enforce.yaml
+
+# Certificates
+*.pem
+*.crt
+*.key
+
+# pcap files
+*.pcap
+*.pcapng
+
+# Logs
+/logs/
+
+# Profiles
+profiles/
+*.profile.json
