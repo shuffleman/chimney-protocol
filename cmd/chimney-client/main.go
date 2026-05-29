@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,12 +40,13 @@ const (
 
 func main() {
 	var (
-		relayAddr  = flag.String("relay", "", "Relay address (host:port)")
-		sni        = flag.String("sni", "", "SNI to use (whitelisted site)")
-		destAddr   = flag.String("dest", "", "Final destination (host:port)")
-		pskHex     = flag.String("psk", "", "Pre-shared key (hex-encoded)")
-		tagLen     = flag.Int("tag-len", auth.DefaultTagLen, "Auth tag length")
-		listenAddr = flag.String("listen", "127.0.0.1:1080", "Local SOCKS5 listen address")
+		relayAddr      = flag.String("relay", "", "Relay address (host:port)")
+		sni            = flag.String("sni", "", "SNI to use (whitelisted site)")
+		destAddr       = flag.String("dest", "", "Final destination (host:port)")
+		pskHex         = flag.String("psk", "", "Pre-shared key (hex-encoded)")
+		tagLen         = flag.Int("tag-len", auth.DefaultTagLen, "Auth tag length")
+		listenAddr     = flag.String("listen", "127.0.0.1:1080", "Local SOCKS5 listen address")
+		fingerprintStr = flag.String("fingerprint", "chrome", "TLS fingerprint(s) to use (comma-separated for rotation)")
 	)
 	flag.Parse()
 
@@ -59,14 +61,23 @@ func main() {
 	}))
 
 	// Create client
+	fingerprints := strings.Split(*fingerprintStr, ",")
+	fpRotator, err := NewFingerprintRotator(fingerprints)
+	if err != nil {
+		logger.Error("invalid fingerprint", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("fingerprint rotation configured", "fingerprints", FingerprintNames(fpRotator))
+
 	client := &Client{
-		RelayAddr:  *relayAddr,
-		SNI:        *sni,
-		DestAddr:   *destAddr,
-		PSKHex:     *pskHex,
-		TagLen:     *tagLen,
-		ListenAddr: *listenAddr,
-		Logger:     logger,
+		RelayAddr:     *relayAddr,
+		SNI:           *sni,
+		DestAddr:      *destAddr,
+		PSKHex:        *pskHex,
+		TagLen:        *tagLen,
+		ListenAddr:    *listenAddr,
+		Fingerprints:  fpRotator,
+		Logger:        logger,
 	}
 
 	if err := client.Run(); err != nil {
@@ -77,13 +88,14 @@ func main() {
 
 // Client is the Chimney client.
 type Client struct {
-	RelayAddr  string
-	SNI        string
-	DestAddr   string
-	PSKHex     string
-	TagLen     int
-	ListenAddr string
-	Logger     *slog.Logger
+	RelayAddr    string
+	SNI          string
+	DestAddr     string
+	PSKHex       string
+	TagLen       int
+	ListenAddr   string
+	Fingerprints *FingerprintRotator
+	Logger       *slog.Logger
 }
 
 // Run starts the client.
@@ -133,7 +145,10 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 		InsecureSkipVerify: true,
 	}
 
-	uConn := utls.UClient(conn, tlsConfig, utls.HelloChrome_Auto)
+	fpID := c.Fingerprints.Next()
+	c.Logger.Debug("using TLS fingerprint", "client", fpID.Client, "version", fpID.Version)
+
+	uConn := utls.UClient(conn, tlsConfig, fpID)
 	uConn.SetSNI(c.SNI)
 
 	if err := uConn.Handshake(); err != nil {

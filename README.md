@@ -146,11 +146,18 @@ log_level: "info"
   -relay relay.example.com:443 \
   -sni real-site.com \
   -dest final-destination.com:443 \
-  -psk your-64-char-hex-psk-here
+  -psk your-64-char-hex-psk-here \
+  -fingerprint chrome,firefox,safari
 ```
 
 The client will start a SOCKS5 proxy on `127.0.0.1:1080`. Configure your
 applications to use this proxy.
+
+The `-fingerprint` flag accepts a comma-separated list of TLS fingerprints
+for rotation. Each new connection uses the next fingerprint in sequence.
+Available fingerprints: `chrome`, `firefox`, `safari`, `ios`, `edge`,
+`android`, `360`, `qq`, `randomized`, `golang`. Append a version for
+specific browser versions (e.g. `chrome-120`, `firefox-105`).
 
 ## Configuration
 
@@ -242,7 +249,7 @@ The Chimney protocol is designed around four security principles:
 | Relay server | ✅ Complete |
 | Client (SOCKS5) | ✅ Complete |
 | Site calibration tool | ✅ Complete |
-| uTLS fingerprint rotation | 🔄 Planned |
+| uTLS fingerprint rotation | ✅ Complete |
 | Padding stream | 🔄 Planned |
 | Real content dilution | 🔄 Planned |
 
@@ -284,7 +291,7 @@ make ci
 **This is a research implementation.** Before production deployment:
 
 1. Implement TLS decryption in calibration tool (keylog support) for precise SETTINGS
-2. Add uTLS fingerprint rotation for diversity
+2. Implement padding stream support for perfect record size matching
 3. Add padding stream support for perfect record size matching
 4. Implement real content dilution for advanced scenarios
 5. Review and harden the H2 engine for all edge cases
