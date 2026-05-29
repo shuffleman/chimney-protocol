@@ -235,6 +235,11 @@ func (s *Server) Stats() *Stats {
 	return s.stats
 }
 
+// UserStore returns the user store for runtime user management.
+func (s *Server) UserStore() *auth.UserStore {
+	return s.userStore
+}
+
 // acceptLoop accepts incoming connections.
 func (s *Server) acceptLoop() {
 	for {

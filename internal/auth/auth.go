@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/shuffleman/chimney-protocol/internal/keyderiv"
 )
@@ -376,6 +377,7 @@ type UserEntry struct {
 // 4-byte hint derived from their user ID. The relay uses the hint from the
 // auth frame to look up the correct PSK for tag verification.
 type UserStore struct {
+	mu     sync.RWMutex
 	byHint map[[4]byte]*UserEntry
 	tagLen int
 }
@@ -444,12 +446,16 @@ func (s *UserStore) TagLen() int {
 }
 
 // lookup returns the entry for a given hint, or nil.
+// Caller must hold s.mu (read or write lock).
 func (s *UserStore) lookup(hint [4]byte) *UserEntry {
 	return s.byHint[hint]
 }
 
 // GenerateTag computes the auth tag for a user identified by hint.
 func (s *UserStore) GenerateTag(hint [4]byte, serverRandom, recordBytes []byte) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	entry := s.lookup(hint)
 	if entry == nil {
 		return nil, fmt.Errorf("auth: unknown key hint %x", hint)
@@ -465,6 +471,9 @@ func (s *UserStore) GenerateTag(hint [4]byte, serverRandom, recordBytes []byte) 
 
 // VerifyTag verifies an auth tag for a user identified by hint.
 func (s *UserStore) VerifyTag(hint [4]byte, serverRandom, recordBytes, tag []byte) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	entry := s.lookup(hint)
 	if entry == nil {
 		return false, fmt.Errorf("auth: unknown key hint %x", hint)
@@ -473,6 +482,62 @@ func (s *UserStore) VerifyTag(hint [4]byte, serverRandom, recordBytes, tag []byt
 		return false, fmt.Errorf("auth: tag length mismatch: got %d, want %d", len(tag), s.tagLen)
 	}
 	return entry.Deriver.VerifyAuthTag(serverRandom, recordBytes, tag)
+}
+
+// AddUser adds or replaces a user at runtime. Thread-safe.
+// If pskHex is empty, PSK is derived as SHA256(userID).
+// If a user with the same hint already exists, it is replaced.
+func (s *UserStore) AddUser(userID, pskHex string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if pskHex == "" {
+		pskHex = hex.EncodeToString(DerivePSKFromID(userID))
+	}
+	psk, err := hex.DecodeString(pskHex)
+	if err != nil {
+		return fmt.Errorf("auth: invalid PSK for user %q: %w", userID, err)
+	}
+
+	hint := keyderiv.ComputeKeyHint(userID)
+	s.byHint[hint] = &UserEntry{
+		UserID:  userID,
+		Deriver: keyderiv.NewDeriver(psk),
+	}
+	return nil
+}
+
+// RemoveUserByID removes a user by their original user identifier. Thread-safe.
+// Returns an error if the user is not found.
+func (s *UserStore) RemoveUserByID(userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	hint := keyderiv.ComputeKeyHint(userID)
+	if _, ok := s.byHint[hint]; !ok {
+		return fmt.Errorf("auth: user %q not found (hint %x)", userID, hint)
+	}
+	delete(s.byHint, hint)
+	return nil
+}
+
+// ListUserIDs returns all currently registered user identifiers. Thread-safe.
+func (s *UserStore) ListUserIDs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ids := make([]string, 0, len(s.byHint))
+	for _, entry := range s.byHint {
+		ids = append(ids, entry.UserID)
+	}
+	return ids
+}
+
+// Count returns the number of registered users. Thread-safe.
+func (s *UserStore) Count() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.byHint)
 }
 
 // ExtractKeyHint extracts the 4-byte key hint from the auth frame payload.

@@ -17,6 +17,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -168,6 +169,69 @@ func startAdminAPI(addr string, server *relay.Server, logger *slog.Logger) {
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "OK")
+	})
+
+	// ── Dynamic User Management ──────────────────────────────
+	http.HandleFunc("/admin/users", func(w http.ResponseWriter, r *http.Request) {
+		us := server.UserStore()
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.Method {
+		case http.MethodGet:
+			ids := us.ListUserIDs()
+			json.NewEncoder(w).Encode(map[string]any{
+				"user_ids": ids,
+				"count":    len(ids),
+			})
+
+		case http.MethodPost:
+			var req struct {
+				UserID string `json:"user_id"`
+				PSK    string `json:"psk,omitempty"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
+				return
+			}
+			if req.UserID == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "user_id is required"})
+				return
+			}
+			if err := us.AddUser(req.UserID, req.PSK); err != nil {
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok", "user_id": req.UserID})
+
+		case http.MethodDelete:
+			var req struct {
+				UserID string `json:"user_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
+				return
+			}
+			if req.UserID == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "user_id is required"})
+				return
+			}
+			if err := us.RemoveUserByID(req.UserID); err != nil {
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok", "user_id": req.UserID})
+
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed"})
+		}
 	})
 
 	logger.Info("admin API listening", "addr", addr)
