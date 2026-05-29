@@ -93,6 +93,12 @@ const (
 	// size targets. The relay silently discards frames on this stream.
 	// Value is a high odd number to avoid collision with normal streams.
 	PaddingStreamID = 0x0FFFFFFF
+
+	// DilutionStreamID is the reserved H2 stream ID for real content dilution.
+	// Dilution DATA frames carry pre-recorded HTTP response blocks from the
+	// whitelisted site, making traffic semantically indistinguishable from
+	// real browsing under deep packet inspection.
+	DilutionStreamID = 0x0FFFFFFD
 )
 
 var (
@@ -624,6 +630,48 @@ func (e *Engine) WriteCombinedRecord(frames ...[]byte) error {
 // Used by the relay to filter out padding frames before dispatching.
 func IsPaddingStream(streamID uint32) bool {
 	return streamID == PaddingStreamID
+}
+
+// IsDilutionStream returns true if the stream ID is the reserved dilution stream.
+func IsDilutionStream(streamID uint32) bool {
+	return streamID == DilutionStreamID
+}
+
+// IsReservedStream returns true for any reserved (non-tunnel) stream ID.
+// Used by the relay to discard padding and dilution frames.
+func IsReservedStream(streamID uint32) bool {
+	return IsPaddingStream(streamID) || IsDilutionStream(streamID)
+}
+
+// WriteDilutionRecord writes a pre-recorded content block as a dilution DATA
+// frame combined with padding to reach targetSize in a single ChimneyRecord.
+// The dilution frame carries semantic content (looks like a real HTTP response),
+// not random bytes.
+func (e *Engine) WriteDilutionRecord(content []byte, targetSize uint16) error {
+	if e.recordWriter == nil {
+		return errors.New("h2engine: record writer not set")
+	}
+
+	dilutionFrame := DataFrame(DilutionStreamID, 0, content)
+
+	if len(dilutionFrame) >= int(targetSize) {
+		return e.recordWriter.WriteRecord(dilutionFrame)
+	}
+
+	// Pad with padding stream data to reach target
+	padLen := int(targetSize) - len(dilutionFrame) - FrameHeaderLen
+	if padLen <= 0 {
+		return e.recordWriter.WriteRecord(dilutionFrame)
+	}
+
+	paddingPayload := make([]byte, padLen)
+	paddingFrame := DataFrame(PaddingStreamID, 0, paddingPayload)
+
+	combined := make([]byte, len(dilutionFrame)+len(paddingFrame))
+	copy(combined, dilutionFrame)
+	copy(combined[len(dilutionFrame):], paddingFrame)
+
+	return e.recordWriter.WriteRecord(combined)
 }
 
 // ReadFrame reads and returns the next H2 frame from the record stream.

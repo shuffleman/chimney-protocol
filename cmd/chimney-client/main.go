@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/shuffleman/chimney-protocol/internal/auth"
+	"github.com/shuffleman/chimney-protocol/internal/dilution"
 	"github.com/shuffleman/chimney-protocol/internal/h2engine"
 	"github.com/shuffleman/chimney-protocol/internal/keyderiv"
 	"github.com/shuffleman/chimney-protocol/internal/profile"
@@ -50,6 +51,7 @@ func main() {
 		fingerprintStr = flag.String("fingerprint", "chrome", "TLS fingerprint(s) to use (comma-separated for rotation)")
 		profileFile    = flag.String("profile", "", "Traffic profile JSON for padding (enables padding stream)")
 		paddingTarget  = flag.Int("padding-target", 0, "Override padding target size (0 = use profile distribution)")
+		dilutionFile   = flag.String("dilution", "", "Pre-recorded content blocks JSON for dilution stream")
 	)
 	flag.Parse()
 
@@ -86,6 +88,20 @@ func main() {
 		)
 	}
 
+	// Load dilution content blocks (optional)
+	var dilutionProv *dilution.Provider
+	if *dilutionFile != "" {
+		dilutionProv, err = dilution.LoadProviderFromFile(*dilutionFile)
+		if err != nil {
+			logger.Error("failed to load dilution blocks", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("dilution content blocks loaded",
+			"blocks", dilutionProv.Len(),
+			"dilution_mode", "enabled",
+		)
+	}
+
 	client := &Client{
 		RelayAddr:     *relayAddr,
 		SNI:           *sni,
@@ -93,10 +109,11 @@ func main() {
 		PSKHex:        *pskHex,
 		TagLen:        *tagLen,
 		ListenAddr:    *listenAddr,
-		Fingerprints:  fpRotator,
-		Profile:       trafficProfile,
-		PaddingTarget: *paddingTarget,
-		Logger:        logger,
+		Fingerprints:     fpRotator,
+		Profile:          trafficProfile,
+		PaddingTarget:    *paddingTarget,
+		DilutionProvider: dilutionProv,
+		Logger:           logger,
 	}
 
 	if err := client.Run(); err != nil {
@@ -113,10 +130,11 @@ type Client struct {
 	PSKHex        string
 	TagLen        int
 	ListenAddr    string
-	Fingerprints  *FingerprintRotator
-	Profile       *profile.Model
-	PaddingTarget int
-	Logger        *slog.Logger
+	Fingerprints     *FingerprintRotator
+	Profile          *profile.Model
+	PaddingTarget    int
+	DilutionProvider *dilution.Provider
+	Logger           *slog.Logger
 }
 
 // Run starts the client.
@@ -306,7 +324,7 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 
 	c.Logger.Info("Chimney tunnel established")
 
-	return newTunnelConn(rawConn, h2Eng, recReader, recWriter, c.Profile, c.PaddingTarget), nil
+	return newTunnelConn(rawConn, h2Eng, recReader, recWriter, c.Profile, c.PaddingTarget, c.DilutionProvider), nil
 }
 
 // completeH2Handshake completes the H2 handshake after the swap.
@@ -503,11 +521,12 @@ type streamFrame struct {
 // tunnelConn wraps the raw TCP connection with H2 stream multiplexing.
 type tunnelConn struct {
 	net.Conn
-	h2Engine     *h2engine.Engine
-	recReader    *record.RecordReader
-	recWriter    *record.RecordWriter
-	profile      *profile.Model
+	h2Engine      *h2engine.Engine
+	recReader     *record.RecordReader
+	recWriter     *record.RecordWriter
+	profile       *profile.Model
 	paddingTarget int
+	dilution      *dilution.Provider
 
 	mu      sync.Mutex
 	streams map[uint32]chan *streamFrame
@@ -515,7 +534,7 @@ type tunnelConn struct {
 }
 
 // newTunnelConn creates a tunnelConn and starts its frame dispatcher.
-func newTunnelConn(rawConn net.Conn, h2Eng *h2engine.Engine, recReader *record.RecordReader, recWriter *record.RecordWriter, prof *profile.Model, paddingTarget int) *tunnelConn {
+func newTunnelConn(rawConn net.Conn, h2Eng *h2engine.Engine, recReader *record.RecordReader, recWriter *record.RecordWriter, prof *profile.Model, paddingTarget int, dilutionProv *dilution.Provider) *tunnelConn {
 	tc := &tunnelConn{
 		Conn:          rawConn,
 		h2Engine:      h2Eng,
@@ -523,10 +542,14 @@ func newTunnelConn(rawConn net.Conn, h2Eng *h2engine.Engine, recReader *record.R
 		recWriter:     recWriter,
 		profile:       prof,
 		paddingTarget: paddingTarget,
+		dilution:      dilutionProv,
 		streams:       make(map[uint32]chan *streamFrame),
 		quit:          make(chan struct{}),
 	}
 	go tc.dispatchFrames()
+	if dilutionProv != nil && prof != nil {
+		go tc.dilutionLoop()
+	}
 	return tc
 }
 
@@ -555,6 +578,43 @@ func (tc *tunnelConn) dispatchFrames() {
 			select {
 			case ch <- &streamFrame{fh, payload}:
 			default:
+			}
+		}
+	}
+}
+
+// dilutionLoop periodically sends dilution records carrying real HTTP content
+// to maintain semantic indistinguishability under DPI. It uses the traffic
+// profile's delay distribution for timing and record size distribution for sizing.
+func (tc *tunnelConn) dilutionLoop() {
+	interval := tc.profile.RecordDelay()
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-tc.quit:
+			return
+		case <-ticker.C:
+			targetSize := tc.profile.RecordSize()
+
+			content := tc.dilution.GetBlock(targetSize)
+			if content == nil {
+				continue
+			}
+
+			if err := tc.h2Engine.WriteDilutionRecord(content, targetSize); err != nil {
+				return
+			}
+
+			// Resample interval for natural jitter
+			nextInterval := tc.profile.RecordDelay()
+			if nextInterval > 0 {
+				ticker.Reset(nextInterval)
 			}
 		}
 	}
