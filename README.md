@@ -241,7 +241,7 @@ The Chimney protocol is designed around four security principles:
 | Traffic profile + pacing | ✅ Complete |
 | Relay server | ✅ Complete |
 | Client (SOCKS5) | ✅ Complete |
-| Site calibration tool | 🔄 Planned |
+| Site calibration tool | ✅ Complete |
 | uTLS fingerprint rotation | 🔄 Planned |
 | Padding stream | 🔄 Planned |
 | Real content dilution | 🔄 Planned |
@@ -283,8 +283,8 @@ make ci
 
 **This is a research implementation.** Before production deployment:
 
-1. Complete the site calibration tool for accurate traffic profiles
-2. Implement proper ClientRandom extraction during handshake relay
+1. Implement TLS decryption in calibration tool (keylog support) for precise SETTINGS
+2. Add uTLS fingerprint rotation for diversity
 3. Add padding stream support for perfect record size matching
 4. Implement real content dilution for advanced scenarios
 5. Review and harden the H2 engine for all edge cases
