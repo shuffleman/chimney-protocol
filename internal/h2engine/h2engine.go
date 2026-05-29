@@ -87,6 +87,12 @@ const (
 	// DefaultSettingsFrameSize is the typical SETTINGS frame size
 	// with 6 settings: 6 * 6 + 9 = 45 bytes.
 	DefaultSettingsPayloadSize = 36 // 6 settings * 6 bytes each
+
+	// PaddingStreamID is the reserved H2 stream ID for padding frames.
+	// Padding DATA frames on this stream carry dummy bytes to fill record
+	// size targets. The relay silently discards frames on this stream.
+	// Value is a high odd number to avoid collision with normal streams.
+	PaddingStreamID = 0x0FFFFFFF
 )
 
 var (
@@ -534,6 +540,90 @@ func (e *Engine) WriteRawFrame(frame []byte) error {
 		return errors.New("h2engine: record writer not set")
 	}
 	return e.recordWriter.WriteRecord(frame)
+}
+
+// WritePaddedRecord writes tunnel data as a DATA frame, optionally appending
+// a padding DATA frame so the combined plaintext reaches targetSize bytes.
+//
+// This produces a single ChimneyRecord containing both frames, matching the
+// target size from the traffic profile. If the tunnel DATA frame alone is
+// already >= targetSize, no padding is added.
+//
+// The relay silently discards frames on PaddingStreamID.
+func (e *Engine) WritePaddedRecord(streamID uint32, data []byte, targetSize uint16, endStream bool) error {
+	if e.recordWriter == nil {
+		return errors.New("h2engine: record writer not set")
+	}
+
+	flags := uint8(0)
+	if endStream {
+		flags = FlagEndStream
+	}
+	tunnelFrame := DataFrame(streamID, flags, data)
+
+	if len(tunnelFrame) >= int(targetSize) {
+		// Tunnel data fills target on its own — no padding needed
+		return e.recordWriter.WriteRecord(tunnelFrame)
+	}
+
+	// Build padding frame to reach target size
+	padLen := int(targetSize) - len(tunnelFrame) - FrameHeaderLen
+	if padLen <= 0 {
+		// Not enough room for a meaningful padding frame; send tunnel data as-is
+		return e.recordWriter.WriteRecord(tunnelFrame)
+	}
+
+	paddingPayload := make([]byte, padLen)
+	paddingFrame := DataFrame(PaddingStreamID, 0, paddingPayload)
+
+	// Combine both frames into one record
+	combined := make([]byte, len(tunnelFrame)+len(paddingFrame))
+	copy(combined, tunnelFrame)
+	copy(combined[len(tunnelFrame):], paddingFrame)
+
+	return e.recordWriter.WriteRecord(combined)
+}
+
+// WritePadding sends a standalone padding record filled to targetSize.
+// Used during idle periods to maintain traffic appearance.
+func (e *Engine) WritePadding(targetSize uint16) error {
+	if e.recordWriter == nil {
+		return errors.New("h2engine: record writer not set")
+	}
+
+	padPayloadLen := int(targetSize) - FrameHeaderLen
+	if padPayloadLen <= 0 {
+		padPayloadLen = 64 // minimal padding
+	}
+	payload := make([]byte, padPayloadLen)
+	frame := DataFrame(PaddingStreamID, 0, payload)
+	return e.recordWriter.WriteRecord(frame)
+}
+
+// WriteCombinedRecord writes multiple H2 frames as a single ChimneyRecord.
+// This is the low-level building block for padding — the caller assembles
+// a tunnel DATA frame and a padding DATA frame, then writes them together.
+func (e *Engine) WriteCombinedRecord(frames ...[]byte) error {
+	if e.recordWriter == nil {
+		return errors.New("h2engine: record writer not set")
+	}
+
+	totalLen := 0
+	for _, f := range frames {
+		totalLen += len(f)
+	}
+	combined := make([]byte, totalLen)
+	off := 0
+	for _, f := range frames {
+		off += copy(combined[off:], f)
+	}
+	return e.recordWriter.WriteRecord(combined)
+}
+
+// IsPaddingStream returns true if the stream ID is the reserved padding stream.
+// Used by the relay to filter out padding frames before dispatching.
+func IsPaddingStream(streamID uint32) bool {
+	return streamID == PaddingStreamID
 }
 
 // ReadFrame reads and returns the next H2 frame from the record stream.

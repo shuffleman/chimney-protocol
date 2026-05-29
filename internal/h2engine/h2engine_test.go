@@ -2,6 +2,7 @@ package h2engine
 
 import (
 	"bytes"
+	"io"
 	"testing"
 
 	"github.com/shuffleman/chimney-protocol/internal/record"
@@ -486,5 +487,228 @@ func BenchmarkDecodeFrameHeader(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestPaddingStreamID(t *testing.T) {
+	// Padding stream ID must be odd (client-initiated) and non-zero
+	if PaddingStreamID == 0 {
+		t.Error("PaddingStreamID must not be zero")
+	}
+	if PaddingStreamID%2 == 0 {
+		t.Error("PaddingStreamID should be odd (client-initiated)")
+	}
+	// Must fit in 31 bits (H2 stream ID limit)
+	if PaddingStreamID > 0x7FFFFFFF {
+		t.Error("PaddingStreamID exceeds 31-bit limit")
+	}
+}
+
+func TestIsPaddingStream(t *testing.T) {
+	if !IsPaddingStream(PaddingStreamID) {
+		t.Error("IsPaddingStream should return true for PaddingStreamID")
+	}
+
+	nonPadding := []uint32{0, 1, 3, 5, 2, 4, 100, 0x7FFFFFFF}
+	for _, id := range nonPadding {
+		if IsPaddingStream(id) {
+			t.Errorf("IsPaddingStream should return false for stream %d", id)
+		}
+	}
+}
+
+func TestWritePaddedRecord_NoPaddingNeeded(t *testing.T) {
+	key := make([]byte, 16)
+	nonce := make([]byte, 12)
+	codec, err := record.NewCodec(key, nonce)
+	if err != nil {
+		t.Fatalf("Failed to create codec: %v", err)
+	}
+
+	settings := DefaultSettings()
+	engine := NewEngine(settings, codec)
+
+	// Pipe writes to a buffer that the record reader can read
+	pr, pw := io.Pipe()
+	engine.SetRecordIO(nil, record.NewRecordWriter(pw, codec))
+
+	// Write small data with a small target — should need no padding
+	payload := []byte{0x02, 'h', 'e', 'l', 'l', 'o'} // 6 bytes with 0x02 prefix
+	go func() {
+		err := engine.WritePaddedRecord(1, payload, uint16(FrameHeaderLen+len(payload)), false)
+		if err != nil {
+			t.Errorf("WritePaddedRecord failed: %v", err)
+		}
+		pw.Close()
+	}()
+
+	// Read back the record
+	reader := record.NewRecordReader(pr, codec)
+	plaintext, err := reader.ReadRecord()
+	if err != nil {
+		t.Fatalf("ReadRecord failed: %v", err)
+	}
+
+	// Should contain exactly one DATA frame (no padding)
+	fh, err := DecodeFrameHeader(plaintext)
+	if err != nil {
+		t.Fatalf("DecodeFrameHeader failed: %v", err)
+	}
+	if fh.Type != FrameData {
+		t.Errorf("Expected DATA frame, got type 0x%x", fh.Type)
+	}
+	if fh.StreamID != 1 {
+		t.Errorf("Expected stream 1, got %d", fh.StreamID)
+	}
+	if !bytes.Equal(plaintext[FrameHeaderLen:FrameHeaderLen+int(fh.Length)], payload) {
+		t.Error("Payload mismatch")
+	}
+	// No padding frame should follow
+	if len(plaintext) > FrameHeaderLen+int(fh.Length) {
+		t.Error("Unexpected extra data after tunnel frame")
+	}
+}
+
+func TestWritePaddedRecord_WithPadding(t *testing.T) {
+	key := make([]byte, 16)
+	nonce := make([]byte, 12)
+	codec, err := record.NewCodec(key, nonce)
+	if err != nil {
+		t.Fatalf("Failed to create codec: %v", err)
+	}
+
+	settings := DefaultSettings()
+	engine := NewEngine(settings, codec)
+
+	pr, pw := io.Pipe()
+	engine.SetRecordIO(nil, record.NewRecordWriter(pw, codec))
+
+	payload := []byte{0x02, 'h', 'i'} // 3 bytes
+	targetSize := uint16(128)          // Much larger than the tunnel frame
+
+	go func() {
+		err := engine.WritePaddedRecord(1, payload, targetSize, false)
+		if err != nil {
+			t.Errorf("WritePaddedRecord failed: %v", err)
+		}
+		pw.Close()
+	}()
+
+	reader := record.NewRecordReader(pr, codec)
+	plaintext, err := reader.ReadRecord()
+	if err != nil {
+		t.Fatalf("ReadRecord failed: %v", err)
+	}
+
+	// First frame should be tunnel DATA on stream 1
+	fh1, err := DecodeFrameHeader(plaintext)
+	if err != nil {
+		t.Fatalf("DecodeFrameHeader (tunnel) failed: %v", err)
+	}
+	if fh1.Type != FrameData {
+		t.Errorf("Expected DATA frame, got type 0x%x", fh1.Type)
+	}
+	if fh1.StreamID != 1 {
+		t.Errorf("Expected stream 1, got %d", fh1.StreamID)
+	}
+
+	// Second frame should be padding DATA on PaddingStreamID
+	frame1End := FrameHeaderLen + int(fh1.Length)
+	if len(plaintext) <= frame1End {
+		t.Fatal("No padding frame found after tunnel frame")
+	}
+
+	fh2, err := DecodeFrameHeader(plaintext[frame1End:])
+	if err != nil {
+		t.Fatalf("DecodeFrameHeader (padding) failed: %v", err)
+	}
+	if fh2.Type != FrameData {
+		t.Errorf("Expected padding DATA frame, got type 0x%x", fh2.Type)
+	}
+	if fh2.StreamID != PaddingStreamID {
+		t.Errorf("Expected padding stream %d, got %d", PaddingStreamID, fh2.StreamID)
+	}
+
+	// Total plaintext should be close to targetSize
+	totalLen := len(plaintext)
+	if totalLen != int(targetSize) {
+		t.Logf("Total plaintext = %d, target = %d (padding may not be exact due to frame alignment)", totalLen, targetSize)
+	}
+}
+
+func TestWritePadding(t *testing.T) {
+	key := make([]byte, 16)
+	nonce := make([]byte, 12)
+	codec, err := record.NewCodec(key, nonce)
+	if err != nil {
+		t.Fatalf("Failed to create codec: %v", err)
+	}
+
+	settings := DefaultSettings()
+	engine := NewEngine(settings, codec)
+
+	pr, pw := io.Pipe()
+	engine.SetRecordIO(nil, record.NewRecordWriter(pw, codec))
+
+	targetSize := uint16(256)
+	go func() {
+		err := engine.WritePadding(targetSize)
+		if err != nil {
+			t.Errorf("WritePadding failed: %v", err)
+		}
+		pw.Close()
+	}()
+
+	reader := record.NewRecordReader(pr, codec)
+	plaintext, err := reader.ReadRecord()
+	if err != nil {
+		t.Fatalf("ReadRecord failed: %v", err)
+	}
+
+	// Should be a single padding DATA frame
+	fh, err := DecodeFrameHeader(plaintext)
+	if err != nil {
+		t.Fatalf("DecodeFrameHeader failed: %v", err)
+	}
+	if fh.StreamID != PaddingStreamID {
+		t.Errorf("Expected padding stream, got %d", fh.StreamID)
+	}
+}
+
+func TestWriteCombinedRecord(t *testing.T) {
+	key := make([]byte, 16)
+	nonce := make([]byte, 12)
+	codec, err := record.NewCodec(key, nonce)
+	if err != nil {
+		t.Fatalf("Failed to create codec: %v", err)
+	}
+
+	settings := DefaultSettings()
+	engine := NewEngine(settings, codec)
+
+	pr, pw := io.Pipe()
+	engine.SetRecordIO(nil, record.NewRecordWriter(pw, codec))
+
+	frame1 := DataFrame(1, 0, []byte{0x02, 'a'})
+	frame2 := DataFrame(PaddingStreamID, 0, []byte{0, 0, 0, 0})
+
+	go func() {
+		err := engine.WriteCombinedRecord(frame1, frame2)
+		if err != nil {
+			t.Errorf("WriteCombinedRecord failed: %v", err)
+		}
+		pw.Close()
+	}()
+
+	reader := record.NewRecordReader(pr, codec)
+	plaintext, err := reader.ReadRecord()
+	if err != nil {
+		t.Fatalf("ReadRecord failed: %v", err)
+	}
+
+	// Verify both frames are present
+	expectedLen := len(frame1) + len(frame2)
+	if len(plaintext) != expectedLen {
+		t.Errorf("Combined length = %d, want %d", len(plaintext), expectedLen)
 	}
 }

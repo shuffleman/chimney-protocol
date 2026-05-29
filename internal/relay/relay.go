@@ -832,6 +832,11 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 			return err
 		}
 
+		// Discard padding frames — they exist only to fill record size targets
+		if h2engine.IsPaddingStream(fh.StreamID) {
+			continue
+		}
+
 		switch fh.Type {
 		case h2engine.FrameData:
 			if payload == nil || len(payload) < 2 {

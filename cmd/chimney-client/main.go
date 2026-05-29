@@ -26,6 +26,7 @@ import (
 	"github.com/shuffleman/chimney-protocol/internal/auth"
 	"github.com/shuffleman/chimney-protocol/internal/h2engine"
 	"github.com/shuffleman/chimney-protocol/internal/keyderiv"
+	"github.com/shuffleman/chimney-protocol/internal/profile"
 	"github.com/shuffleman/chimney-protocol/internal/record"
 	utls "github.com/refraction-networking/utls"
 )
@@ -47,6 +48,8 @@ func main() {
 		tagLen         = flag.Int("tag-len", auth.DefaultTagLen, "Auth tag length")
 		listenAddr     = flag.String("listen", "127.0.0.1:1080", "Local SOCKS5 listen address")
 		fingerprintStr = flag.String("fingerprint", "chrome", "TLS fingerprint(s) to use (comma-separated for rotation)")
+		profileFile    = flag.String("profile", "", "Traffic profile JSON for padding (enables padding stream)")
+		paddingTarget  = flag.Int("padding-target", 0, "Override padding target size (0 = use profile distribution)")
 	)
 	flag.Parse()
 
@@ -69,6 +72,20 @@ func main() {
 	}
 	logger.Info("fingerprint rotation configured", "fingerprints", FingerprintNames(fpRotator))
 
+	// Load traffic profile for padding (optional)
+	var trafficProfile *profile.Model
+	if *profileFile != "" {
+		trafficProfile, err = profile.LoadModelFromFile(*profileFile)
+		if err != nil {
+			logger.Error("failed to load profile", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("traffic profile loaded",
+			"site", trafficProfile.SiteName,
+			"padding_mode", "enabled",
+		)
+	}
+
 	client := &Client{
 		RelayAddr:     *relayAddr,
 		SNI:           *sni,
@@ -77,6 +94,8 @@ func main() {
 		TagLen:        *tagLen,
 		ListenAddr:    *listenAddr,
 		Fingerprints:  fpRotator,
+		Profile:       trafficProfile,
+		PaddingTarget: *paddingTarget,
 		Logger:        logger,
 	}
 
@@ -88,14 +107,16 @@ func main() {
 
 // Client is the Chimney client.
 type Client struct {
-	RelayAddr    string
-	SNI          string
-	DestAddr     string
-	PSKHex       string
-	TagLen       int
-	ListenAddr   string
-	Fingerprints *FingerprintRotator
-	Logger       *slog.Logger
+	RelayAddr     string
+	SNI           string
+	DestAddr      string
+	PSKHex        string
+	TagLen        int
+	ListenAddr    string
+	Fingerprints  *FingerprintRotator
+	Profile       *profile.Model
+	PaddingTarget int
+	Logger        *slog.Logger
 }
 
 // Run starts the client.
@@ -285,7 +306,7 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 
 	c.Logger.Info("Chimney tunnel established")
 
-	return newTunnelConn(rawConn, h2Eng, recReader, recWriter), nil
+	return newTunnelConn(rawConn, h2Eng, recReader, recWriter, c.Profile, c.PaddingTarget), nil
 }
 
 // completeH2Handshake completes the H2 handshake after the swap.
@@ -482,9 +503,11 @@ type streamFrame struct {
 // tunnelConn wraps the raw TCP connection with H2 stream multiplexing.
 type tunnelConn struct {
 	net.Conn
-	h2Engine  *h2engine.Engine
-	recReader *record.RecordReader
-	recWriter *record.RecordWriter
+	h2Engine     *h2engine.Engine
+	recReader    *record.RecordReader
+	recWriter    *record.RecordWriter
+	profile      *profile.Model
+	paddingTarget int
 
 	mu      sync.Mutex
 	streams map[uint32]chan *streamFrame
@@ -492,14 +515,16 @@ type tunnelConn struct {
 }
 
 // newTunnelConn creates a tunnelConn and starts its frame dispatcher.
-func newTunnelConn(rawConn net.Conn, h2Eng *h2engine.Engine, recReader *record.RecordReader, recWriter *record.RecordWriter) *tunnelConn {
+func newTunnelConn(rawConn net.Conn, h2Eng *h2engine.Engine, recReader *record.RecordReader, recWriter *record.RecordWriter, prof *profile.Model, paddingTarget int) *tunnelConn {
 	tc := &tunnelConn{
-		Conn:      rawConn,
-		h2Engine:  h2Eng,
-		recReader: recReader,
-		recWriter: recWriter,
-		streams:   make(map[uint32]chan *streamFrame),
-		quit:      make(chan struct{}),
+		Conn:          rawConn,
+		h2Engine:      h2Eng,
+		recReader:     recReader,
+		recWriter:     recWriter,
+		profile:       prof,
+		paddingTarget: paddingTarget,
+		streams:       make(map[uint32]chan *streamFrame),
+		quit:          make(chan struct{}),
 	}
 	go tc.dispatchFrames()
 	return tc
@@ -613,12 +638,30 @@ func (ts *tunnelStream) Read(p []byte) (int, error) {
 }
 
 // Write writes data to the stream, prefixing with 0x02 DATA command.
+// If a traffic profile is configured, the record is padded to match
+// the target size distribution.
 func (ts *tunnelStream) Write(p []byte) (int, error) {
 	data := make([]byte, 1+len(p))
 	data[0] = 0x02
 	copy(data[1:], p)
-	if err := ts.tc.h2Engine.WriteData(ts.streamID, data, false); err != nil {
-		return 0, err
+
+	var targetSize uint16
+	if ts.tc.profile != nil {
+		if ts.tc.paddingTarget > 0 {
+			targetSize = uint16(ts.tc.paddingTarget)
+		} else {
+			targetSize = ts.tc.profile.RecordSize()
+		}
+	}
+
+	if targetSize > 0 {
+		if err := ts.tc.h2Engine.WritePaddedRecord(ts.streamID, data, targetSize, false); err != nil {
+			return 0, err
+		}
+	} else {
+		if err := ts.tc.h2Engine.WriteData(ts.streamID, data, false); err != nil {
+			return 0, err
+		}
 	}
 	return len(p), nil
 }
