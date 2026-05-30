@@ -17,6 +17,7 @@
 package relay
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -115,10 +116,20 @@ type Config struct {
 	TagLen int
 
 	// IntentFile is the path to the intent whitelist file.
+	// Ignored if IntentYAML is non-empty.
 	IntentFile string
 
 	// EnforceFile is the path to the enforce CIDR file.
+	// Ignored if EnforceYAML is non-empty.
 	EnforceFile string
+
+	// IntentYAML is the inline intent whitelist YAML content.
+	// When non-empty, takes precedence over IntentFile.
+	IntentYAML string
+
+	// EnforceYAML is the inline enforce CIDR YAML content.
+	// When non-empty, takes precedence over EnforceFile.
+	EnforceYAML string
 
 	// CloudRegion is the cloud region for CIDR validation (e.g., "us-east-1").
 	CloudRegion string
@@ -138,6 +149,13 @@ type Config struct {
 
 	// ProfileDir is the directory containing site profile files.
 	ProfileDir string
+
+	// BackendDialer is an optional custom dialer for backend connections.
+	// When set, it is used instead of net.DialTimeout for all backend
+	// connections created during tunnel handling (CONNECT commands).
+	// This allows integration with external routing frameworks.
+	// Signature matches net.Dialer.DialContext.
+	BackendDialer func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // DefaultConfig returns a default configuration.
@@ -169,29 +187,50 @@ func NewServer(config *Config, logger *slog.Logger) (*Server, error) {
 	if config == nil {
 		config = DefaultConfig()
 	}
+	if config.HandshakeTimeout == 0 {
+		config.HandshakeTimeout = HandshakeTimeout
+	}
+	if config.AuthReadTimeout == 0 {
+		config.AuthReadTimeout = AuthReadTimeout
+	}
 
-	// Load whitelist
-	whitelistMgr, err := whitelist.LoadManager(config.IntentFile, config.EnforceFile)
-	if err != nil {
-		logger.Warn("failed to load whitelist, using empty", "error", err)
+	// Load whitelist: inline YAML takes precedence over file paths.
+	var whitelistMgr *whitelist.Manager
+	var loadErr error
+	if config.IntentYAML != "" || config.EnforceYAML != "" {
+		whitelistMgr, loadErr = whitelist.LoadManagerFromContent(
+			[]byte(config.IntentYAML), []byte(config.EnforceYAML),
+		)
+	} else {
+		whitelistMgr, loadErr = whitelist.LoadManager(config.IntentFile, config.EnforceFile)
+	}
+	if loadErr != nil {
+		logger.Warn("failed to load whitelist, using empty", "error", loadErr)
 		whitelistMgr = whitelist.NewManager(whitelist.NewIntentLayer(), whitelist.NewEnforceLayer())
 	}
+	logger.Debug("whitelist loaded",
+		"intent_snis", whitelistMgr.Intent.List(),
+		"enforce_entries", len(whitelistMgr.Enforce.Entries),
+		"inline_intent_len", len(config.IntentYAML),
+		"inline_enforce_len", len(config.EnforceYAML),
+	)
 
 	// Create user store for authentication.
 	// Priority: Users (explicit PSK map) > UserIDs (UUID-derived PSK) > PSK (single-user).
 	var userStore *auth.UserStore
+	var userErr error
 	switch {
 	case len(config.Users) > 0:
-		userStore, err = auth.NewUserStore(config.Users, config.TagLen)
+		userStore, userErr = auth.NewUserStore(config.Users, config.TagLen)
 	case len(config.UserIDs) > 0:
-		userStore, err = auth.NewUserStoreFromIDs(config.UserIDs, config.TagLen)
+		userStore, userErr = auth.NewUserStoreFromIDs(config.UserIDs, config.TagLen)
 	case config.PSK != "":
-		userStore, err = auth.NewUserStore(map[string]string{"default": config.PSK}, config.TagLen)
+		userStore, userErr = auth.NewUserStore(map[string]string{"default": config.PSK}, config.TagLen)
 	default:
 		return nil, fmt.Errorf("relay: one of PSK, Users, or UserIDs must be configured")
 	}
-	if err != nil {
-		return nil, fmt.Errorf("relay: failed to create user store: %w", err)
+	if userErr != nil {
+		return nil, fmt.Errorf("relay: failed to create user store: %w", userErr)
 	}
 
 	return &Server{
@@ -610,20 +649,75 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 	// If we return an error before the "swap complete" log, the caller
 	// can fall back to transparent forwarding.
 
-	deriver, err := keyderiv.NewDeriverFromHex(s.config.PSK)
-	if err != nil {
-		return fmt.Errorf("create deriver: %w", err)
+	// Collect all derivers to try: explicit PSK first, then all user derivers.
+	var allDerivers []*keyderiv.Deriver
+	if s.config.PSK != "" {
+		d, err := keyderiv.NewDeriverFromHex(s.config.PSK)
+		if err != nil {
+			return fmt.Errorf("create deriver: %w", err)
+		}
+		allDerivers = append(allDerivers, d)
+	}
+	if s.userStore != nil && s.userStore.Count() > 0 {
+		allDerivers = append(allDerivers, s.userStore.GetAllDerivers()...)
+	}
+	if len(allDerivers) == 0 {
+		return fmt.Errorf("no derivers available (PSK empty and no users)")
 	}
 
-	sendKey, recvKey, err := deriver.DeriveDirectionalKeys(serverRandom, clientRandom)
+	// Scan firstAppData for a valid ChimneyRecord, trying each deriver.
+	// uTLS may have sent post-handshake 0x17 records before the
+	// ChimneyRecord, so we iterate through TLS records and test each.
+	var chimneyRecord, preludeRecords []byte
+	var matchedDeriver *keyderiv.Deriver
+	for _, d := range allDerivers {
+		chimneyRecord, preludeRecords = findChimneyRecord(firstAppData, d, serverRandom, clientRandom, logger)
+		if chimneyRecord != nil {
+			matchedDeriver = d
+			break
+		}
+	}
+
+	// If not found yet, the ChimneyRecord may not have arrived yet
+	// (the client does its own drain+encode before writing).
+	// Read more from clientConn and retry.
+	if chimneyRecord == nil && len(firstAppData) < 4096 {
+		logger.Debug("ChimneyRecord not in initial buffer, reading more from client")
+		clientConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		readBuf := make([]byte, TCPBufferSize)
+		for i := 0; i < 3 && chimneyRecord == nil; i++ {
+			n, rdErr := clientConn.Read(readBuf)
+			if n > 0 {
+				firstAppData = append(firstAppData, readBuf[:n]...)
+				for _, d := range allDerivers {
+					chimneyRecord, preludeRecords = findChimneyRecord(firstAppData, d, serverRandom, clientRandom, logger)
+					if chimneyRecord != nil {
+						matchedDeriver = d
+						break
+					}
+				}
+			}
+			if rdErr != nil {
+				break
+			}
+		}
+		clientConn.SetReadDeadline(time.Time{})
+	}
+
+	if chimneyRecord == nil {
+		logger.Debug("no ChimneyRecord found in first app data, falling back to forwarding")
+		return fmt.Errorf("not a Chimney record: no valid record in %d bytes", len(firstAppData))
+	}
+
+	sendKey, recvKey, err := matchedDeriver.DeriveDirectionalKeys(serverRandom, clientRandom)
 	if err != nil {
 		return fmt.Errorf("derive directional keys: %w", err)
 	}
-	sendNonceBase, err := deriver.DeriveNonceBase(serverRandom, clientRandom)
+	sendNonceBase, err := matchedDeriver.DeriveNonceBase(serverRandom, clientRandom)
 	if err != nil {
 		return fmt.Errorf("derive send nonce base: %w", err)
 	}
-	recvNonceBase, err := deriver.DeriveNonceBase(clientRandom, serverRandom)
+	recvNonceBase, err := matchedDeriver.DeriveNonceBase(clientRandom, serverRandom)
 	if err != nil {
 		return fmt.Errorf("derive recv nonce base: %w", err)
 	}
@@ -641,42 +735,12 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 	// Same logic applies to nonce bases (info order matters for derivation).
 	codec, err := record.NewCodecWithDirectionalKeys(recvKey, recvNonceBase, sendKey, sendNonceBase)
 	if err != nil {
-		kSess, _ := deriver.DeriveSessionKey(serverRandom, clientRandom)
-		nonceBase, _ := deriver.DeriveNonceBase(serverRandom, clientRandom)
+		kSess, _ := matchedDeriver.DeriveSessionKey(serverRandom, clientRandom)
+		nonceBase, _ := matchedDeriver.DeriveNonceBase(serverRandom, clientRandom)
 		codec, err = record.NewCodec(kSess, nonceBase)
 		if err != nil {
 			return fmt.Errorf("create codec: %w", err)
 		}
-	}
-
-	// Scan firstAppData for a valid ChimneyRecord.
-	// uTLS may have sent post-handshake 0x17 records before the
-	// ChimneyRecord, so we iterate through TLS records and test each.
-	chimneyRecord, preludeRecords := findChimneyRecord(firstAppData, deriver, serverRandom, clientRandom, logger)
-
-	// If not found yet, the ChimneyRecord may not have arrived yet
-	// (the client does its own drain+encode before writing).
-	// Read more from clientConn and retry.
-	if chimneyRecord == nil && len(firstAppData) < 4096 {
-		logger.Debug("ChimneyRecord not in initial buffer, reading more from client")
-		clientConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		readBuf := make([]byte, TCPBufferSize)
-		for i := 0; i < 3 && chimneyRecord == nil; i++ {
-			n, rdErr := clientConn.Read(readBuf)
-			if n > 0 {
-				firstAppData = append(firstAppData, readBuf[:n]...)
-				chimneyRecord, preludeRecords = findChimneyRecord(firstAppData, deriver, serverRandom, clientRandom, logger)
-			}
-			if rdErr != nil {
-				break
-			}
-		}
-		clientConn.SetReadDeadline(time.Time{})
-	}
-
-	if chimneyRecord == nil {
-		logger.Debug("no ChimneyRecord found in first app data, falling back to forwarding")
-		return fmt.Errorf("not a Chimney record: no valid record in %d bytes", len(firstAppData))
 	}
 
 	// Forward any prelude (non-Chimney) records to the real site.
@@ -693,8 +757,8 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 	// The previous codec was only used for scanning.
 	codec, err = record.NewCodecWithDirectionalKeys(recvKey, recvNonceBase, sendKey, sendNonceBase)
 	if err != nil {
-		kSess, _ := deriver.DeriveSessionKey(serverRandom, clientRandom)
-		nonceBase, _ := deriver.DeriveNonceBase(serverRandom, clientRandom)
+		kSess, _ := matchedDeriver.DeriveSessionKey(serverRandom, clientRandom)
+		nonceBase, _ := matchedDeriver.DeriveNonceBase(serverRandom, clientRandom)
 		codec, err = record.NewCodec(kSess, nonceBase)
 		if err != nil {
 			return fmt.Errorf("create codec: %w", err)
@@ -789,14 +853,16 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 
 // tunnelConnPool manages backend connections for tunneled streams.
 type tunnelConnPool struct {
-	mu      sync.Mutex
-	streams map[uint32]net.Conn
-	dest    string
+	mu            sync.Mutex
+	streams       map[uint32]net.Conn
+	dest          string
+	backendDialer func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-func newTunnelConnPool() *tunnelConnPool {
+func newTunnelConnPool(backendDialer func(ctx context.Context, network, addr string) (net.Conn, error)) *tunnelConnPool {
 	return &tunnelConnPool{
-		streams: make(map[uint32]net.Conn),
+		streams:       make(map[uint32]net.Conn),
+		backendDialer: backendDialer,
 	}
 }
 
@@ -814,7 +880,13 @@ func (p *tunnelConnPool) createForStream(streamID uint32, dest string) (net.Conn
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	conn, err := net.DialTimeout("tcp", dest, 10*time.Second)
+	var conn net.Conn
+	var err error
+	if p.backendDialer != nil {
+		conn, err = p.backendDialer(context.Background(), "tcp", dest)
+	} else {
+		conn, err = net.DialTimeout("tcp", dest, 10*time.Second)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("dial backend %s: %w", dest, err)
 	}
@@ -844,7 +916,7 @@ func (p *tunnelConnPool) closeAll() {
 
 // handleTunnel handles the H2 tunnel after swap with traffic profile pacing.
 func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error {
-	pool := newTunnelConnPool()
+	pool := newTunnelConnPool(s.config.BackendDialer)
 	defer pool.closeAll()
 
 	var trafficProfile *profile.Model

@@ -533,6 +533,18 @@ func (s *UserStore) ListUserIDs() []string {
 	return ids
 }
 
+// GetAllDerivers returns all user derivers for multi-user record scanning.
+// Thread-safe.
+func (s *UserStore) GetAllDerivers() []*keyderiv.Deriver {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	derivers := make([]*keyderiv.Deriver, 0, len(s.byHint))
+	for _, entry := range s.byHint {
+		derivers = append(derivers, entry.Deriver)
+	}
+	return derivers
+}
+
 // Count returns the number of registered users. Thread-safe.
 func (s *UserStore) Count() int {
 	s.mu.RLock()

@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -34,6 +35,7 @@ import (
 	"github.com/shuffleman/chimney-protocol/internal/keyderiv"
 	"github.com/shuffleman/chimney-protocol/internal/profile"
 	"github.com/shuffleman/chimney-protocol/internal/record"
+	"github.com/shuffleman/chimney-protocol/internal/relay"
 
 	utls "github.com/refraction-networking/utls"
 )
@@ -687,3 +689,108 @@ var _ net.Conn = (*streamConn)(nil)
 
 // Ensure crypto/tls is importable (utls.Config shadows it, but is never used directly).
 var _ = tls.VersionTLS12
+
+// RelayConfig holds the configuration for a Chimney relay server.
+// This is the public API for creating a relay server from external packages.
+type RelayConfig struct {
+	// ListenAddr is the address to listen on (e.g. ":443").
+	ListenAddr string
+
+	// PSK is the pre-shared key (hex-encoded) for single-user mode.
+	PSK string
+
+	// Users maps user identifiers to their hex-encoded PSKs for multi-user mode.
+	Users map[string]string
+
+	// UserIDs is a list of user identifiers for multi-user mode.
+	// Each user's PSK is derived as PSK = SHA256(userID).
+	UserIDs []string
+
+	// TagLen is the authentication tag length in bytes.
+	TagLen int
+
+	// IntentFile is the path to the intent whitelist file.
+	// Ignored if IntentYAML is non-empty.
+	IntentFile string
+
+	// EnforceFile is the path to the enforce CIDR file.
+	// Ignored if EnforceYAML is non-empty.
+	EnforceFile string
+
+	// IntentYAML is the inline intent whitelist YAML content.
+	// When non-empty, takes precedence over IntentFile.
+	IntentYAML string
+
+	// EnforceYAML is the inline enforce CIDR YAML content.
+	// When non-empty, takes precedence over EnforceFile.
+	EnforceYAML string
+
+	// CloudRegion is the cloud region for CIDR validation.
+	CloudRegion string
+
+	// DefaultBackend is the fallback backend for non-authenticated traffic.
+	DefaultBackend string
+
+	// HandshakeTimeout for TLS handshake relay.
+	HandshakeTimeout time.Duration
+
+	// AuthReadTimeout for reading the auth record.
+	AuthReadTimeout time.Duration
+
+	// EnableProfiling enables traffic profiling and pacing.
+	EnableProfiling bool
+
+	// ProfileDir is the directory containing site profile files.
+	ProfileDir string
+
+	// BackendDialer is an optional custom dialer for backend connections.
+	BackendDialer func(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+// RelayServer wraps the relay server for public consumption.
+type RelayServer struct {
+	srv *relay.Server
+}
+
+// NewRelayServer creates a new Chimney relay server.
+// The server does NOT start listening until Start() is called.
+func NewRelayServer(config *RelayConfig, logger *slog.Logger) (*RelayServer, error) {
+	cfg := &relay.Config{
+		ListenAddr:       config.ListenAddr,
+		PSK:              config.PSK,
+		Users:            config.Users,
+		UserIDs:          config.UserIDs,
+		TagLen:           config.TagLen,
+		IntentFile:       config.IntentFile,
+		EnforceFile:      config.EnforceFile,
+		IntentYAML:       config.IntentYAML,
+		EnforceYAML:      config.EnforceYAML,
+		CloudRegion:      config.CloudRegion,
+		DefaultBackend:   config.DefaultBackend,
+		HandshakeTimeout: config.HandshakeTimeout,
+		AuthReadTimeout:  config.AuthReadTimeout,
+		EnableProfiling:  config.EnableProfiling,
+		ProfileDir:       config.ProfileDir,
+		BackendDialer:    config.BackendDialer,
+	}
+	srv, err := relay.NewServer(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	return &RelayServer{srv: srv}, nil
+}
+
+// Start starts the relay server listener.
+func (rs *RelayServer) Start() error {
+	return rs.srv.Start()
+}
+
+// Stop stops the relay server and waits for active connections to drain.
+func (rs *RelayServer) Stop() error {
+	return rs.srv.Stop()
+}
+
+// Stats returns the relay server statistics.
+func (rs *RelayServer) Stats() *relay.Stats {
+	return rs.srv.Stats()
+}

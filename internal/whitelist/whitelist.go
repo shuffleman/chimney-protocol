@@ -102,10 +102,24 @@ func LoadIntentFromYAML(path string) (*IntentLayer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("whitelist: failed to read intent file %s: %w", path, err)
 	}
+	return ParseIntentYAML(data)
+}
 
+// ParseIntentYAML parses intent YAML content from bytes.
+func ParseIntentYAML(data []byte) (*IntentLayer, error) {
+	return parseIntentData(data, yaml.Unmarshal)
+}
+
+// ParseIntentJSON parses intent JSON content from bytes.
+func ParseIntentJSON(data []byte) (*IntentLayer, error) {
+	return parseIntentData(data, json.Unmarshal)
+}
+
+// parseIntentData parses intent data with the given unmarshaler.
+func parseIntentData(data []byte, unmarshal func([]byte, interface{}) error) (*IntentLayer, error) {
 	intent := NewIntentLayer()
-	if err := yaml.Unmarshal(data, intent); err != nil {
-		return nil, fmt.Errorf("whitelist: failed to parse intent YAML: %w", err)
+	if err := unmarshal(data, intent); err != nil {
+		return nil, fmt.Errorf("whitelist: failed to parse intent: %w", err)
 	}
 
 	// Normalize SNIs to lowercase
@@ -238,10 +252,24 @@ func LoadEnforceFromYAML(path string) (*EnforceLayer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("whitelist: failed to read enforce file %s: %w", path, err)
 	}
+	return ParseEnforceYAML(data)
+}
 
+// ParseEnforceYAML parses enforce YAML content from bytes.
+func ParseEnforceYAML(data []byte) (*EnforceLayer, error) {
+	return parseEnforceData(data, yaml.Unmarshal)
+}
+
+// ParseEnforceJSON parses enforce JSON content from bytes.
+func ParseEnforceJSON(data []byte) (*EnforceLayer, error) {
+	return parseEnforceData(data, json.Unmarshal)
+}
+
+// parseEnforceData parses enforce data with the given unmarshaler.
+func parseEnforceData(data []byte, unmarshal func([]byte, interface{}) error) (*EnforceLayer, error) {
 	enforce := NewEnforceLayer()
-	if err := yaml.Unmarshal(data, enforce); err != nil {
-		return nil, fmt.Errorf("whitelist: failed to parse enforce YAML: %w", err)
+	if err := unmarshal(data, enforce); err != nil {
+		return nil, fmt.Errorf("whitelist: failed to parse enforce: %w", err)
 	}
 
 	if err := enforce.parseCIDRs(); err != nil {
@@ -410,6 +438,48 @@ func LoadManager(intentPath, enforcePath string) (*Manager, error) {
 	}
 
 	return NewManager(intent, enforce), nil
+}
+
+// LoadManagerFromContent loads both whitelist layers from inline content.
+// Auto-detects JSON vs YAML: JSON if data starts with '{', YAML otherwise.
+// Empty slices create empty layers.
+func LoadManagerFromContent(intentData, enforceData []byte) (*Manager, error) {
+	var intent *IntentLayer
+	var enforce *EnforceLayer
+	var err error
+
+	if len(intentData) > 0 {
+		if isJSON(intentData) {
+			intent, err = ParseIntentJSON(intentData)
+		} else {
+			intent, err = ParseIntentYAML(intentData)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("whitelist: failed to parse intent: %w", err)
+		}
+	} else {
+		intent = NewIntentLayer()
+	}
+
+	if len(enforceData) > 0 {
+		if isJSON(enforceData) {
+			enforce, err = ParseEnforceJSON(enforceData)
+		} else {
+			enforce, err = ParseEnforceYAML(enforceData)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("whitelist: failed to parse enforce: %w", err)
+		}
+	} else {
+		enforce = NewEnforceLayer()
+	}
+
+	return NewManager(intent, enforce), nil
+}
+
+// isJSON returns true if the data looks like JSON (starts with '{' after trimming).
+func isJSON(data []byte) bool {
+	return strings.HasPrefix(strings.TrimSpace(string(data)), "{")
 }
 
 // CheckSNI checks if an SNI passes the intent layer (关卡A).
