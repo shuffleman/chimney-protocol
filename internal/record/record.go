@@ -333,6 +333,7 @@ func (c *Codec) DecodeRecord(data []byte) (*DecodeRecordResult, error) {
 
 // RecordWriter writes ChimneyRecords to an underlying io.Writer.
 type RecordWriter struct {
+	mu     sync.Mutex
 	codec  *Codec
 	writer io.Writer
 }
@@ -343,7 +344,10 @@ func NewRecordWriter(w io.Writer, codec *Codec) *RecordWriter {
 }
 
 // WriteRecord writes a single plaintext chunk as a complete ChimneyRecord.
+// Thread-safe: serializes EncodeRecord + Write to prevent interleaving.
 func (rw *RecordWriter) WriteRecord(plaintext []byte) error {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
 	record := rw.codec.EncodeRecord(plaintext)
 	_, err := rw.writer.Write(record)
 	return err
@@ -351,6 +355,7 @@ func (rw *RecordWriter) WriteRecord(plaintext []byte) error {
 
 // RecordReader reads and decrypts ChimneyRecords from an underlying io.Reader.
 type RecordReader struct {
+	mu     sync.Mutex
 	codec  *Codec
 	reader io.Reader
 	buf    []byte
@@ -367,7 +372,10 @@ func NewRecordReader(r io.Reader, codec *Codec) *RecordReader {
 
 // ReadRecord reads and decrypts the next complete ChimneyRecord.
 // Returns io.EOF if the underlying reader returns io.EOF with no data.
+// Thread-safe.
 func (rr *RecordReader) ReadRecord() ([]byte, error) {
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
 	for {
 		// Try to decode from buffer
 		if len(rr.buf) >= RecordHeaderLen {
