@@ -15,6 +15,11 @@
 //
 //	conn, err := d.DialContext(ctx, "tcp", "api.example.com:443")
 //	// conn is a net.Conn — use like any TCP connection.
+//
+// The Dialer maintains a pool of H2 connections to the relay. Each connection
+// has its own TCP socket and frame-dispatch goroutine, so higher PoolSize
+// values increase throughput for high-concurrency workloads. PoolSize defaults
+// to 4; set to 1 for single-connection mode (lower resource usage).
 package chimney
 
 import (
@@ -27,6 +32,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shuffleman/chimney-protocol/internal/auth"
@@ -46,6 +52,9 @@ const (
 
 	// DefaultHandshakeTimeout is the default timeout for TLS + H2 handshake.
 	DefaultHandshakeTimeout = 10 * time.Second
+
+	// DefaultPoolSize is the default number of parallel H2 connections.
+	DefaultPoolSize = 4
 )
 
 // Config holds all parameters for establishing a Chimney tunnel.
@@ -89,12 +98,17 @@ type Config struct {
 
 	// HandshakeTimeout is the TLS + H2 handshake timeout (default: 10s).
 	HandshakeTimeout time.Duration
+
+	// PoolSize is the number of parallel H2 connections to the relay (default: 4).
+	// Higher values increase throughput under high concurrency by parallelising
+	// frame dispatch across multiple TCP sockets. Set to 1 for single-connection
+	// mode (lowest resource usage, sufficient for low concurrency).
+	PoolSize int
 }
 
-// A Dialer represents an established Chimney tunnel to a relay.
-// Multiple goroutines may invoke DialContext concurrently; each call opens
-// an independent H2 stream multiplexed over the same TLS connection.
-type Dialer struct {
+// tunnel is a single H2 connection to the relay. The Dialer maintains a pool
+// of these to parallelise frame dispatch under high concurrency.
+type tunnel struct {
 	rawConn   net.Conn
 	h2Eng     *h2engine.Engine
 	recReader *record.RecordReader
@@ -106,7 +120,22 @@ type Dialer struct {
 	mu      sync.Mutex
 	streams map[uint32]chan *streamFrame
 	quit    chan struct{}
+	dead    chan struct{}
 	closed  bool
+}
+
+// A Dialer maintains a pool of H2 connections to a Chimney relay.
+// Multiple goroutines may invoke DialContext concurrently; calls are
+// distributed across the pool connections round-robin.
+type Dialer struct {
+	config Config
+	pool   []*tunnel
+	next   atomic.Uint32
+	mu     sync.Mutex
+	closed bool
+
+	prof     *profile.Model
+	dilution *dilution.Provider
 }
 
 // streamFrame is a frame received for a specific H2 stream.
@@ -117,9 +146,11 @@ type streamFrame struct {
 
 // streamConn wraps a single H2 stream as a net.Conn.
 type streamConn struct {
-	d        *Dialer
+	t        *tunnel
 	streamID uint32
 	ch       chan *streamFrame
+
+	readBuf []byte // leftover data from partial read of an H2 frame payload
 
 	readDeadline  time.Time
 	writeDeadline time.Time
@@ -132,7 +163,15 @@ func (a addr) Network() string { return a.network }
 func (a addr) String() string  { return a.str }
 
 // Read reads data from the stream, stripping the 0x02 DATA prefix.
+// Uses an internal readBuf to prevent data loss when callers read in small chunks
+// (e.g., crypto/tls reading a 5-byte TLS record header before the record body).
 func (c *streamConn) Read(p []byte) (int, error) {
+	if len(c.readBuf) > 0 {
+		n := copy(p, c.readBuf)
+		c.readBuf = c.readBuf[n:]
+		return n, nil
+	}
+
 	select {
 	case sf, ok := <-c.ch:
 		if !ok {
@@ -140,14 +179,27 @@ func (c *streamConn) Read(p []byte) (int, error) {
 		}
 		if sf.fh.Type == h2engine.FrameData && len(sf.payload) > 0 {
 			switch sf.payload[0] {
-			case 0x02: // DATA
-				return copy(p, sf.payload[1:]), nil
+			case 0x02: // DATA with chimney prefix
+				data := sf.payload[1:]
+				n := copy(p, data)
+				if n < len(data) {
+					c.readBuf = append(c.readBuf, data[n:]...)
+				}
+				return n, nil
 			case 0x03: // CLOSE
 				return 0, io.EOF
+			default:
+				// No chimney prefix — continuation of a fragmented write.
+				// The entire payload is raw data.
+				n := copy(p, sf.payload)
+				if n < len(sf.payload) {
+					c.readBuf = append(c.readBuf, sf.payload[n:]...)
+				}
+				return n, nil
 			}
 		}
 		return 0, nil
-	case <-c.d.quit:
+	case <-c.t.quit:
 		return 0, io.ErrClosedPipe
 	}
 }
@@ -160,32 +212,45 @@ func (c *streamConn) Write(p []byte) (int, error) {
 	copy(data[1:], p)
 
 	var targetSize uint16
-	if c.d.prof != nil {
-		if c.d.padTarget > 0 {
-			targetSize = uint16(c.d.padTarget)
+	if c.t.prof != nil {
+		if c.t.padTarget > 0 {
+			targetSize = uint16(c.t.padTarget)
 		} else {
-			targetSize = c.d.prof.RecordSize()
+			targetSize = c.t.prof.RecordSize()
 		}
 	}
 
 	if targetSize > 0 {
-		if err := c.d.h2Eng.WritePaddedRecord(c.streamID, data, targetSize, false); err != nil {
+		if err := c.t.h2Eng.WritePaddedRecord(c.streamID, data, targetSize, false); err != nil {
 			return 0, err
 		}
 	} else {
-		if err := c.d.h2Eng.WriteData(c.streamID, data, false); err != nil {
+		if err := c.t.h2Eng.WriteData(c.streamID, data, false); err != nil {
 			return 0, err
 		}
 	}
 	return len(p), nil
 }
 
+// IsDead returns true when all tunnels' dispatch goroutines have exited,
+// indicating the underlying connections are dead and a new dialer is needed.
+func (d *Dialer) IsDead() bool {
+	for _, t := range d.pool {
+		select {
+		case <-t.dead:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // Close sends a CLOSE command and unregisters the stream.
 func (c *streamConn) Close() error {
-	c.d.h2Eng.WriteData(c.streamID, []byte{0x03}, false)
-	c.d.mu.Lock()
-	delete(c.d.streams, c.streamID)
-	c.d.mu.Unlock()
+	c.t.h2Eng.WriteData(c.streamID, []byte{0x03}, false)
+	c.t.mu.Lock()
+	delete(c.t.streams, c.streamID)
+	c.t.mu.Unlock()
 	return nil
 }
 
@@ -208,35 +273,18 @@ func (c *streamConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-// NewDialer connects to a Chimney relay, establishes a TLS + H2 tunnel,
-// and returns a Dialer ready to open streams via DialContext.
-func NewDialer(config Config) (*Dialer, error) {
-	// Apply defaults
-	if config.TagLen == 0 {
-		config.TagLen = auth.DefaultTagLen
-	}
-	if config.Fingerprint == "" {
-		config.Fingerprint = "chrome"
-	}
-	if config.ConnectTimeout == 0 {
-		config.ConnectTimeout = DefaultConnectTimeout
-	}
-	if config.HandshakeTimeout == 0 {
-		config.HandshakeTimeout = DefaultHandshakeTimeout
-	}
-
-	// Derive PSK from UserID if no explicit PSK is given.
-	if config.PSK == "" {
-		if config.UserID == "" {
-			config.UserID = "default"
-		}
-		config.PSK = hex.EncodeToString(auth.DerivePSKFromID(config.UserID))
-	}
-
+// newTunnel establishes a single H2-tunneled connection to the relay.
+func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tunnel, error) {
 	// Step 1: TCP connect
 	rawConn, err := net.DialTimeout("tcp", config.RelayAddr, config.ConnectTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("chimney: connect to relay: %w", err)
+	}
+
+	if tcpConn, ok := rawConn.(*net.TCPConn); ok {
+		tcpConn.SetReadBuffer(256 * 1024)
+		tcpConn.SetWriteBuffer(256 * 1024)
+		tcpConn.SetNoDelay(true)
 	}
 
 	// Step 2: uTLS handshake
@@ -248,7 +296,7 @@ func NewDialer(config Config) (*Dialer, error) {
 
 	tlsConfig := &utls.Config{
 		ServerName:         config.SNI,
-		InsecureSkipVerify: true, // relay forwards to real site
+		InsecureSkipVerify: true,
 	}
 
 	uConn := utls.UClient(rawConn, tlsConfig, fpID)
@@ -280,8 +328,6 @@ func NewDialer(config Config) (*Dialer, error) {
 		return nil, fmt.Errorf("chimney: auth tag: %w", err)
 	}
 
-	// Compute key hint for multi-user auth.
-	// If no UserID is set, default to "default" for single-user compatibility.
 	userID := config.UserID
 	if userID == "" {
 		userID = "default"
@@ -308,7 +354,6 @@ func NewDialer(config Config) (*Dialer, error) {
 
 	codec, err := record.NewCodecWithDirectionalKeys(sendKey, sendNonceBase, recvKey, recvNonceBase)
 	if err != nil {
-		// Fallback to bidirectional
 		kSess, _ := deriver.DeriveSessionKey(serverRandom, clientRandom)
 		nonceBase, _ := deriver.DeriveNonceBase(serverRandom, clientRandom)
 		codec, err = record.NewCodec(kSess, nonceBase)
@@ -318,9 +363,12 @@ func NewDialer(config Config) (*Dialer, error) {
 		}
 	}
 
-	// Step 4: Drain stale TCP bytes
+	// Step 4: Drain stale TCP bytes.
+	// Use a very short deadline — on clean connections (e.g. loopback)
+	// this returns immediately; on real networks buffered data drains
+	// within the first few reads without blocking tunnel setup.
 	rawTCPConn := uConn.GetUnderlyingConn()
-	rawTCPConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	rawTCPConn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
 	drainBuf := make([]byte, 8192)
 	for {
 		_, err := rawTCPConn.Read(drainBuf)
@@ -346,7 +394,7 @@ func NewDialer(config Config) (*Dialer, error) {
 	h2Eng := h2engine.NewEngine(settings, codec)
 	h2Eng.SetRecordIO(recReader, recWriter)
 
-	// Step 8: Complete H2 handshake (read server SETTINGS → send ACK → read ACK)
+	// Step 8: Complete H2 handshake
 	fh, _, err := h2Eng.ReadFrame()
 	if err != nil {
 		uConn.Close()
@@ -373,8 +421,7 @@ func NewDialer(config Config) (*Dialer, error) {
 		return nil, fmt.Errorf("chimney: expected SETTINGS ACK, got type 0x%x flags 0x%x", fh.Type, fh.Flags)
 	}
 
-	// Step 9: Send auth tag with key hint prefix.
-	// Extended auth frame format: [key_hint (4 bytes)] [tag (tagLen bytes)]
+	// Step 9: Send auth tag
 	authStreamID := h2Eng.OpenStream()
 	authPayload := make([]byte, 4+len(tag))
 	copy(authPayload, keyHint[:])
@@ -385,26 +432,7 @@ func NewDialer(config Config) (*Dialer, error) {
 		return nil, fmt.Errorf("chimney: send auth tag: %w", err)
 	}
 
-	// Step 10: Load optional profile and dilution
-	var prof *profile.Model
-	if config.ProfilePath != "" {
-		prof, err = profile.LoadModelFromFile(config.ProfilePath)
-		if err != nil {
-			uConn.Close()
-			return nil, fmt.Errorf("chimney: load profile: %w", err)
-		}
-	}
-
-	var dil *dilution.Provider
-	if config.DilutionPath != "" {
-		dil, err = dilution.LoadProviderFromFile(config.DilutionPath)
-		if err != nil {
-			uConn.Close()
-			return nil, fmt.Errorf("chimney: load dilution: %w", err)
-		}
-	}
-
-	d := &Dialer{
+	t := &tunnel{
 		rawConn:   rawTCPConn,
 		h2Eng:     h2Eng,
 		recReader: recReader,
@@ -414,18 +442,85 @@ func NewDialer(config Config) (*Dialer, error) {
 		dilution:  dil,
 		streams:   make(map[uint32]chan *streamFrame),
 		quit:      make(chan struct{}),
+		dead:      make(chan struct{}),
 	}
 
-	go d.dispatchFrames()
+	go t.dispatchFrames()
 	if dil != nil && prof != nil {
-		go d.dilutionLoop()
+		go t.dilutionLoop()
 	}
 
-	return d, nil
+	return t, nil
+}
+
+// NewDialer connects to a Chimney relay, establishes PoolSize TLS+H2 tunnels,
+// and returns a Dialer ready to open streams via DialContext.
+func NewDialer(config Config) (*Dialer, error) {
+	if config.TagLen == 0 {
+		config.TagLen = auth.DefaultTagLen
+	}
+	if config.Fingerprint == "" {
+		config.Fingerprint = "chrome"
+	}
+	if config.ConnectTimeout == 0 {
+		config.ConnectTimeout = DefaultConnectTimeout
+	}
+	if config.HandshakeTimeout == 0 {
+		config.HandshakeTimeout = DefaultHandshakeTimeout
+	}
+	if config.PoolSize <= 0 {
+		config.PoolSize = DefaultPoolSize
+	}
+
+	if config.PSK == "" {
+		if config.UserID == "" {
+			config.UserID = "default"
+		}
+		config.PSK = hex.EncodeToString(auth.DerivePSKFromID(config.UserID))
+	}
+
+	var prof *profile.Model
+	if config.ProfilePath != "" {
+		var err error
+		prof, err = profile.LoadModelFromFile(config.ProfilePath)
+		if err != nil {
+			return nil, fmt.Errorf("chimney: load profile: %w", err)
+		}
+	}
+
+	var dil *dilution.Provider
+	if config.DilutionPath != "" {
+		var err error
+		dil, err = dilution.LoadProviderFromFile(config.DilutionPath)
+		if err != nil {
+			return nil, fmt.Errorf("chimney: load dilution: %w", err)
+		}
+	}
+
+	pool := make([]*tunnel, config.PoolSize)
+	for i := 0; i < config.PoolSize; i++ {
+		t, err := newTunnel(config, prof, dil)
+		if err != nil {
+			// Close already-created tunnels on partial failure.
+			for j := 0; j < i; j++ {
+				pool[j].closeTunnel()
+			}
+			return nil, err
+		}
+		pool[i] = t
+	}
+
+	return &Dialer{
+		config:   config,
+		pool:     pool,
+		prof:     prof,
+		dilution: dil,
+	}, nil
 }
 
 // DialContext opens a new H2 stream through the Chimney tunnel to addr.
 // The returned net.Conn is a virtual connection multiplexed over H2.
+// Streams are distributed across the connection pool round-robin.
 //
 // network is ignored (always TCP). addr must be "host:port".
 func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -436,36 +531,43 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	}
 	d.mu.Unlock()
 
-	streamID := d.h2Eng.OpenStream()
-	ch := make(chan *streamFrame, 16)
+	// Round-robin across the connection pool.
+	idx := d.next.Add(1) % uint32(len(d.pool))
+	t := d.pool[idx]
 
-	d.mu.Lock()
-	d.streams[streamID] = ch
-	d.mu.Unlock()
+	return t.dialContext(ctx, addr)
+}
 
-	// Send CONNECT command
+// dialContext opens a stream on a single tunnel.
+func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error) {
+	streamID := t.h2Eng.OpenStream()
+	ch := make(chan *streamFrame, 256)
+
+	t.mu.Lock()
+	t.streams[streamID] = ch
+	t.mu.Unlock()
+
 	connectCmd := make([]byte, 1+len(addr))
 	connectCmd[0] = 0x01
 	copy(connectCmd[1:], addr)
-	if err := d.h2Eng.WriteData(streamID, connectCmd, false); err != nil {
-		d.mu.Lock()
-		delete(d.streams, streamID)
-		d.mu.Unlock()
+	if err := t.h2Eng.WriteData(streamID, connectCmd, false); err != nil {
+		t.mu.Lock()
+		delete(t.streams, streamID)
+		t.mu.Unlock()
 		return nil, fmt.Errorf("chimney: CONNECT: %w", err)
 	}
 
-	// Wait for CONNECT_OK or context cancellation
 	for {
 		select {
 		case <-ctx.Done():
-			d.mu.Lock()
-			delete(d.streams, streamID)
-			d.mu.Unlock()
+			t.mu.Lock()
+			delete(t.streams, streamID)
+			t.mu.Unlock()
 			return nil, ctx.Err()
-		case <-d.quit:
-			d.mu.Lock()
-			delete(d.streams, streamID)
-			d.mu.Unlock()
+		case <-t.quit:
+			t.mu.Lock()
+			delete(t.streams, streamID)
+			t.mu.Unlock()
 			return nil, net.ErrClosed
 		case sf, ok := <-ch:
 			if !ok {
@@ -473,16 +575,16 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 			}
 			if sf.fh.Type == h2engine.FrameData && len(sf.payload) > 0 {
 				switch sf.payload[0] {
-				case 0x01: // CONNECT_OK
+				case 0x01:
 					return &streamConn{
-						d:        d,
+						t:        t,
 						streamID: streamID,
 						ch:       ch,
 					}, nil
 				default:
-					d.mu.Lock()
-					delete(d.streams, streamID)
-					d.mu.Unlock()
+					t.mu.Lock()
+					delete(t.streams, streamID)
+					t.mu.Unlock()
 					return nil, fmt.Errorf("chimney: backend connect failed: code 0x%02x", sf.payload[0])
 				}
 			}
@@ -490,7 +592,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	}
 }
 
-// Close shuts down the Chimney tunnel and all active streams.
+// Close shuts down all tunnels in the pool.
 func (d *Dialer) Close() error {
 	d.mu.Lock()
 	if d.closed {
@@ -498,39 +600,55 @@ func (d *Dialer) Close() error {
 		return nil
 	}
 	d.closed = true
-	close(d.quit)
-
-	// Close all stream channels
-	for _, ch := range d.streams {
-		close(ch)
-	}
-	d.streams = nil
 	d.mu.Unlock()
 
-	return d.rawConn.Close()
+	for _, t := range d.pool {
+		t.closeTunnel()
+	}
+	return nil
+}
+
+func (t *tunnel) closeTunnel() error {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return nil
+	}
+	t.closed = true
+	close(t.quit)
+
+	for _, ch := range t.streams {
+		close(ch)
+	}
+	t.streams = nil
+	t.mu.Unlock()
+
+	t.recWriter.Close()
+	return t.rawConn.Close()
 }
 
 // dispatchFrames reads frames from the H2 engine and routes them to per-stream channels.
-func (d *Dialer) dispatchFrames() {
+func (t *tunnel) dispatchFrames() {
+	defer close(t.dead)
 	for {
 		select {
-		case <-d.quit:
+		case <-t.quit:
 			return
 		default:
 		}
-		fh, payload, err := d.h2Eng.ReadFrame()
+		fh, payload, err := t.h2Eng.ReadFrame()
 		if err != nil {
-			d.mu.Lock()
-			for _, ch := range d.streams {
+			t.mu.Lock()
+			for _, ch := range t.streams {
 				close(ch)
 			}
-			d.streams = make(map[uint32]chan *streamFrame)
-			d.mu.Unlock()
+			t.streams = make(map[uint32]chan *streamFrame)
+			t.mu.Unlock()
 			return
 		}
-		d.mu.Lock()
-		ch, ok := d.streams[fh.StreamID]
-		d.mu.Unlock()
+		t.mu.Lock()
+		ch, ok := t.streams[fh.StreamID]
+		t.mu.Unlock()
 		if ok {
 			select {
 			case ch <- &streamFrame{fh, payload}:
@@ -541,8 +659,8 @@ func (d *Dialer) dispatchFrames() {
 }
 
 // dilutionLoop periodically sends dilution records with real HTTP content.
-func (d *Dialer) dilutionLoop() {
-	interval := d.prof.RecordDelay()
+func (t *tunnel) dilutionLoop() {
+	interval := t.prof.RecordDelay()
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
@@ -552,18 +670,18 @@ func (d *Dialer) dilutionLoop() {
 
 	for {
 		select {
-		case <-d.quit:
+		case <-t.quit:
 			return
 		case <-ticker.C:
-			targetSize := d.prof.RecordSize()
-			content := d.dilution.GetBlock(targetSize)
+			targetSize := t.prof.RecordSize()
+			content := t.dilution.GetBlock(targetSize)
 			if content == nil {
 				continue
 			}
-			if err := d.h2Eng.WriteDilutionRecord(content, targetSize); err != nil {
+			if err := t.h2Eng.WriteDilutionRecord(content, targetSize); err != nil {
 				return
 			}
-			nextInterval := d.prof.RecordDelay()
+			nextInterval := t.prof.RecordDelay()
 			if nextInterval > 0 {
 				ticker.Reset(nextInterval)
 			}

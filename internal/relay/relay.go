@@ -50,6 +50,9 @@ const (
 	// TCPBufferSize is the buffer size for TCP relay.
 	TCPBufferSize = 32 * 1024
 
+	// MaxConcurrentBackendDials limits simultaneous backend TCP dials
+	// to prevent overwhelming the backend's listen backlog (TCP SYN flood).
+	MaxConcurrentBackendDials = 64
 )
 
 var (
@@ -91,6 +94,13 @@ type Server struct {
 	wg     sync.WaitGroup
 	mu     sync.RWMutex
 	closed atomic.Bool
+
+	// dialSem limits concurrent backend TCP dials across all tunnels
+	// to prevent overwhelming the backend's listen backlog.
+	dialSem chan struct{}
+
+	// connSem limits total open backend connections across all tunnels.
+	connSem chan struct{}
 }
 
 // Config holds the relay server configuration.
@@ -239,6 +249,8 @@ func NewServer(config *Config, logger *slog.Logger) (*Server, error) {
 		userStore:    userStore,
 		stats:        &Stats{},
 		logger:       logger,
+		dialSem:      make(chan struct{}, MaxConcurrentBackendDials),
+		connSem:      make(chan struct{}, MaxBackendConnsGlobal),
 	}, nil
 }
 
@@ -307,6 +319,13 @@ func (s *Server) acceptLoop() {
 // handleConnection handles a single client connection.
 func (s *Server) handleConnection(clientConn net.Conn) {
 	defer clientConn.Close()
+
+	// Tune TCP buffers for high-concurrency H2 multiplexing.
+	if tcpConn, ok := clientConn.(*net.TCPConn); ok {
+		tcpConn.SetReadBuffer(256 * 1024)
+		tcpConn.SetWriteBuffer(256 * 1024)
+		tcpConn.SetNoDelay(true)
+	}
 
 	logger := s.logger.With("remote", clientConn.RemoteAddr().String())
 	logger.Debug("new connection")
@@ -769,6 +788,7 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 	wrappedReader := &prependConn{Conn: clientConn, prefix: chimneyRecord}
 	recReader := record.NewRecordReader(wrappedReader, codec)
 	recWriter := record.NewRecordWriter(wrappedReader, codec)
+	defer recWriter.Close()
 
 	settings := h2engine.DefaultSettings()
 	if siteEntry, ok := s.whitelistMgr.GetSiteInfo(sni); ok {
@@ -851,18 +871,28 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 	return s.handleTunnel(h2Eng, logger)
 }
 
+// MaxBackendConnsGlobal limits the total number of open backend connections
+// across all H2 tunnels to prevent overwhelming the backend server's listen backlog.
+const MaxBackendConnsGlobal = 128
+
 // tunnelConnPool manages backend connections for tunneled streams.
 type tunnelConnPool struct {
 	mu            sync.Mutex
 	streams       map[uint32]net.Conn
+	pending       map[uint32][][]byte
 	dest          string
 	backendDialer func(ctx context.Context, network, addr string) (net.Conn, error)
+	dialSem       chan struct{} // limits concurrent backend dials (shared across tunnels)
+	connSem       chan struct{} // limits total open backend conns (shared across tunnels)
 }
 
-func newTunnelConnPool(backendDialer func(ctx context.Context, network, addr string) (net.Conn, error)) *tunnelConnPool {
+func newTunnelConnPool(backendDialer func(ctx context.Context, network, addr string) (net.Conn, error), dialSem, connSem chan struct{}) *tunnelConnPool {
 	return &tunnelConnPool{
 		streams:       make(map[uint32]net.Conn),
+		pending:       make(map[uint32][][]byte),
 		backendDialer: backendDialer,
+		dialSem:       dialSem,
+		connSem:       connSem,
 	}
 }
 
@@ -877,8 +907,14 @@ func (p *tunnelConnPool) getOrCreate(streamID uint32) (net.Conn, error) {
 }
 
 func (p *tunnelConnPool) createForStream(streamID uint32, dest string) (net.Conn, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	// Acquire connection slot first — this provides backpressure when the
+	// tunnel already has maxBackendConnsPerTunnel open backend connections.
+	p.connSem <- struct{}{}
+
+	// Acquire dial semaphore to prevent overwhelming the backend server's
+	// listen backlog with simultaneous TCP dials across all tunnels.
+	p.dialSem <- struct{}{}
+	defer func() { <-p.dialSem }()
 
 	var conn net.Conn
 	var err error
@@ -888,9 +924,16 @@ func (p *tunnelConnPool) createForStream(streamID uint32, dest string) (net.Conn
 		conn, err = net.DialTimeout("tcp", dest, 10*time.Second)
 	}
 	if err != nil {
+		<-p.connSem // release slot on dial failure
 		return nil, fmt.Errorf("dial backend %s: %w", dest, err)
 	}
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+	}
+
+	p.mu.Lock()
 	p.streams[streamID] = conn
+	p.mu.Unlock()
 	return conn, nil
 }
 
@@ -904,6 +947,41 @@ func (p *tunnelConnPool) closeStream(streamID uint32) {
 	}
 }
 
+func (p *tunnelConnPool) addPending(streamID uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pending[streamID] = nil
+}
+
+func (p *tunnelConnPool) bufferForPending(streamID uint32, data []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.pending[streamID]; ok {
+		d := make([]byte, len(data))
+		copy(d, data)
+		p.pending[streamID] = append(p.pending[streamID], d)
+	}
+}
+
+func (p *tunnelConnPool) isPending(streamID uint32) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.pending[streamID]
+	return ok
+}
+
+func (p *tunnelConnPool) flushPending(streamID uint32, conn net.Conn, logger *slog.Logger) {
+	p.mu.Lock()
+	bufs := p.pending[streamID]
+	delete(p.pending, streamID)
+	p.mu.Unlock()
+	for _, data := range bufs {
+		if _, err := conn.Write(data); err != nil {
+			logger.Debug("flush pending write failed", "error", err)
+		}
+	}
+}
+
 func (p *tunnelConnPool) closeAll() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -912,11 +990,14 @@ func (p *tunnelConnPool) closeAll() {
 		conn.Close()
 		delete(p.streams, id)
 	}
+	for id := range p.pending {
+		delete(p.pending, id)
+	}
 }
 
 // handleTunnel handles the H2 tunnel after swap with traffic profile pacing.
 func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error {
-	pool := newTunnelConnPool(s.config.BackendDialer)
+	pool := newTunnelConnPool(s.config.BackendDialer, s.dialSem, s.connSem)
 	defer pool.closeAll()
 
 	var trafficProfile *profile.Model
@@ -943,42 +1024,60 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 
 		switch fh.Type {
 		case h2engine.FrameData:
-			if payload == nil || len(payload) < 2 {
+			if payload == nil || len(payload) < 1 {
 				continue
 			}
 			cmd := payload[0]
 			cmdData := payload[1:]
 
-			switch cmd {
-			case 0x01: // CONNECT
+			// Buffer data for streams whose CONNECT is still in progress.
+			if pool.isPending(fh.StreamID) {
+				pool.bufferForPending(fh.StreamID, payload)
+				continue
+			}
+
+			// If stream already has a backend, all DATA frames carry data
+			// (or CLOSE). The 0x02 chimney prefix may be absent on continuation
+			// frames produced by H2 fragmentation of a single chimney write.
+			if backendConn, err := pool.getOrCreate(fh.StreamID); err == nil {
+				if cmd == 0x03 {
+					logger.Debug("CLOSE stream", "stream_id", fh.StreamID)
+					pool.closeStream(fh.StreamID)
+				} else if cmd == 0x02 {
+					if _, err := backendConn.Write(cmdData); err != nil {
+						logger.Debug("backend write failed", "error", err)
+						pool.closeStream(fh.StreamID)
+					}
+				} else {
+					// Continuation frame: entire payload is raw data.
+					if _, err := backendConn.Write(payload); err != nil {
+						logger.Debug("backend write failed", "error", err)
+						pool.closeStream(fh.StreamID)
+					}
+				}
+				continue
+			}
+
+			// No backend yet — expect CONNECT (0x01).
+			if cmd == 0x01 {
 				dest := string(cmdData)
 				logger.Debug("CONNECT", "stream_id", fh.StreamID, "dest", dest)
-				backendConn, err := pool.createForStream(fh.StreamID, dest)
-				if err != nil {
-					logger.Debug("backend connect failed", "error", err)
-					rstFrame := h2engine.RSTStreamFrame(fh.StreamID, h2engine.H2ErrRefusedStream)
-					h2Eng.WriteRawFrame(rstFrame)
-					continue
-				}
-				if err := h2Eng.WriteData(fh.StreamID, []byte{0x01}, false); err != nil {
-					logger.Debug("failed to send CONNECT_OK", "error", err)
-				}
-				go s.readBackend(fh.StreamID, backendConn, h2Eng, logger)
-
-			case 0x02: // DATA
-				backendConn, err := pool.getOrCreate(fh.StreamID)
-				if err != nil {
-					logger.Debug("no backend for stream", "stream_id", fh.StreamID)
-					continue
-				}
-				if _, err := backendConn.Write(cmdData); err != nil {
-					logger.Debug("backend write failed", "error", err)
-					pool.closeStream(fh.StreamID)
-				}
-
-			case 0x03: // CLOSE
-				logger.Debug("CLOSE stream", "stream_id", fh.StreamID)
-				pool.closeStream(fh.StreamID)
+				pool.addPending(fh.StreamID)
+				go func(sid uint32, destination string) {
+					backendConn, err := pool.createForStream(sid, destination)
+					if err != nil {
+						logger.Debug("backend connect failed", "error", err)
+						rstFrame := h2engine.RSTStreamFrame(sid, h2engine.H2ErrRefusedStream)
+						h2Eng.WriteRawFrame(rstFrame)
+						return
+					}
+					defer func() { <-pool.connSem }()
+					if err := h2Eng.WriteData(sid, []byte{0x01}, false); err != nil {
+						logger.Debug("failed to send CONNECT_OK", "error", err)
+					}
+					pool.flushPending(sid, backendConn, logger)
+					s.readBackend(sid, backendConn, h2Eng, logger)
+				}(fh.StreamID, dest)
 			}
 
 		case h2engine.FrameWindowUpdate:

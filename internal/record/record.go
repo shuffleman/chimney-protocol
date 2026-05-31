@@ -38,8 +38,8 @@ const (
 	AESGCMTagSize           = 16
 
 	// MaxPlaintextLen is the maximum length of a single record's plaintext payload.
-	// TLS 1.3 limits plaintext to 2^14 bytes; we stay within that.
-	MaxPlaintextLen = 16384 // 16 KiB
+	// Must be >= max H2 frame size (FrameHeaderLen + MaxFrameSize = 9 + 16384 = 16393).
+	MaxPlaintextLen = 16400
 
 	// MaxRecordLen is the maximum on-the-wire record size.
 	MaxRecordLen = RecordHeaderLen + MaxPlaintextLen + AESGCMTagSize // ~16KiB + overhead
@@ -331,7 +331,9 @@ func (c *Codec) DecodeRecord(data []byte) (*DecodeRecordResult, error) {
 	}, nil
 }
 
-// RecordWriter writes ChimneyRecords to an underlying io.Writer.
+// RecordWriter serializes ChimneyRecord writes with a mutex.
+// Each call to WriteRecord encodes and writes atomically to prevent
+// interleaving of encrypted records on the underlying stream.
 type RecordWriter struct {
 	mu     sync.Mutex
 	codec  *Codec
@@ -340,17 +342,25 @@ type RecordWriter struct {
 
 // NewRecordWriter creates a RecordWriter.
 func NewRecordWriter(w io.Writer, codec *Codec) *RecordWriter {
-	return &RecordWriter{codec: codec, writer: w}
+	return &RecordWriter{
+		codec:  codec,
+		writer: w,
+	}
 }
 
 // WriteRecord writes a single plaintext chunk as a complete ChimneyRecord.
-// Thread-safe: serializes EncodeRecord + Write to prevent interleaving.
+// Thread-safe.
 func (rw *RecordWriter) WriteRecord(plaintext []byte) error {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
 	record := rw.codec.EncodeRecord(plaintext)
 	_, err := rw.writer.Write(record)
 	return err
+}
+
+// Close is a no-op for the mutex-based RecordWriter.
+func (rw *RecordWriter) Close() error {
+	return nil
 }
 
 // RecordReader reads and decrypts ChimneyRecords from an underlying io.Reader.

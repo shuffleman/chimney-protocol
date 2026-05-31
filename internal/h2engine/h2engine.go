@@ -478,36 +478,29 @@ func (e *Engine) OpenStream() uint32 {
 // WriteData writes data as DATA frames on the given stream.
 // Data is automatically fragmented according to MaxFrameSize.
 func (e *Engine) WriteData(streamID uint32, data []byte, endStream bool) error {
-	e.mu.RLock()
+	e.mu.Lock()
 	stream, exists := e.streams[streamID]
-	maxFrameSize := e.settings.MaxFrameSizeActual
-	e.mu.RUnlock()
-
 	if !exists {
-		// Auto-create remote-initiated streams (e.g., client streams on relay)
-		e.mu.Lock()
 		initialWindow := int32(65535)
 		if e.settings.InitialWindowSize != nil {
 			initialWindow = int32(*e.settings.InitialWindowSize)
 		}
-		e.streams[streamID] = &Stream{
+		stream = &Stream{
 			ID:         streamID,
 			State:      StreamOpen,
 			Window:     initialWindow,
 			RecvWindow: initialWindow,
 		}
-		e.mu.Unlock()
-		// Re-read under RLock to match the normal path
-		e.mu.RLock()
-		stream = e.streams[streamID]
-		maxFrameSize = e.settings.MaxFrameSizeActual
-		e.mu.RUnlock()
+		e.streams[streamID] = stream
 	}
 	if stream.State != StreamOpen {
+		e.mu.Unlock()
 		return fmt.Errorf("h2engine: stream %d not in open state", streamID)
 	}
+	maxFrameSize := e.settings.MaxFrameSizeActual
+	e.mu.Unlock()
 
-	// Fragment data into frames
+	// Fragment data into frames (I/O outside lock)
 	offset := 0
 	for offset < len(data) {
 		chunkSize := int(maxFrameSize)
@@ -679,12 +672,15 @@ func (e *Engine) WriteDilutionRecord(content []byte, targetSize uint16) error {
 func (e *Engine) ReadFrame() (*FrameHeader, []byte, error) {
 	for {
 		// Try to parse a frame from readBuf
+		e.mu.Lock()
 		if len(e.readBuf) >= FrameHeaderLen {
 			fh, err := DecodeFrameHeader(e.readBuf)
 			if err != nil {
+				e.mu.Unlock()
 				return nil, nil, err
 			}
 			if fh.Length > uint32(e.settings.MaxFrameSizeActual) {
+				e.mu.Unlock()
 				return nil, nil, ErrFrameSizeError
 			}
 			totalLen := FrameHeaderLen + int(fh.Length)
@@ -692,16 +688,20 @@ func (e *Engine) ReadFrame() (*FrameHeader, []byte, error) {
 				payload := make([]byte, fh.Length)
 				copy(payload, e.readBuf[FrameHeaderLen:totalLen])
 				e.readBuf = e.readBuf[totalLen:]
+				e.mu.Unlock()
 				return fh, payload, nil
 			}
 		}
+		e.mu.Unlock()
 
-		// Need more data
+		// Need more data — I/O outside lock
 		record, err := e.recordReader.ReadRecord()
 		if err != nil {
 			return nil, nil, err
 		}
+		e.mu.Lock()
 		e.readBuf = append(e.readBuf, record...)
+		e.mu.Unlock()
 	}
 }
 
