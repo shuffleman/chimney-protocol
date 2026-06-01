@@ -376,6 +376,15 @@ func (e *Engine) SetRecordIO(reader *record.RecordReader, writer *record.RecordW
 	e.recordWriter = writer
 }
 
+// CodecSeqs returns the current sealer and opener sequence numbers from the
+// underlying record codec. Used for diagnostics during tunnel failures.
+func (e *Engine) CodecSeqs() (sealerSeq, openerSeq uint64) {
+	if e.recordCodec == nil {
+		return 0, 0
+	}
+	return e.recordCodec.SealerSeq(), e.recordCodec.OpenerSeq()
+}
+
 // InitiateAsClient performs the client-side H2 opening sequence:
 //   1. Send preface + SETTINGS
 //   2. Receive server SETTINGS

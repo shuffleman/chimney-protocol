@@ -1239,7 +1239,9 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 				logger.Debug("tunnel closed by client")
 				return nil
 			}
-			logger.Debug("frame read error", "error", err)
+			sealerSeq, openerSeq := h2Eng.CodecSeqs()
+			logger.Debug("frame read error", "error", err,
+				"sealer_seq", sealerSeq, "opener_seq", openerSeq)
 			return err
 		}
 

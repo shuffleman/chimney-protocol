@@ -122,11 +122,19 @@ type tunnel struct {
 	padTarget int
 	dilution  *dilution.Provider
 
-	mu      sync.Mutex
-	streams map[uint32]chan *streamFrame
-	quit    chan struct{}
-	dead    chan struct{}
-	closed  bool
+	mu        sync.Mutex
+	streams   map[uint32]chan *streamFrame
+	quit      chan struct{}
+	dead      chan struct{}
+	closed    bool
+	lastError error // set when dispatchFrames exits on read error
+}
+
+// LastError returns the error that caused dispatchFrames to exit, if any.
+func (t *tunnel) LastError() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastError
 }
 
 // A Dialer maintains a pool of H2 connections to a Chimney relay.
@@ -280,6 +288,17 @@ func (d *Dialer) IsDead() bool {
 		}
 	}
 	return true
+}
+
+// LastError returns the last dispatch error from any tunnel, or nil.
+// Useful for diagnosing why the dialer died.
+func (d *Dialer) LastError() error {
+	for _, t := range d.pool {
+		if err := t.LastError(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Close sends a CLOSE command and unregisters the stream.
@@ -948,6 +967,9 @@ func (t *tunnel) dispatchFrames() {
 		}
 		fh, payload, err := t.h2Eng.ReadFrame()
 		if err != nil {
+			sealerSeq, openerSeq := t.h2Eng.CodecSeqs()
+			t.lastError = fmt.Errorf("frame read: %w [sealer_seq=%d opener_seq=%d]",
+				err, sealerSeq, openerSeq)
 			t.mu.Lock()
 			for _, ch := range t.streams {
 				close(ch)

@@ -190,10 +190,11 @@ func (s *Sealer) rollbackSeq() {
 
 // Opener handles AEAD opening (decryption) of record payloads.
 type Opener struct {
-	aead  cipher.AEAD
-	nonce NonceStrategy
-	seq   uint64
-	mu    sync.Mutex
+	aead     cipher.AEAD
+	nonce    NonceStrategy
+	seq      uint64
+	failures uint64 // consecutive AEAD failures (reset on success)
+	mu       sync.Mutex
 }
 
 // NewOpenerAESGCM creates an opener using AES-128-GCM (or AES-256-GCM).
@@ -212,19 +213,34 @@ func NewOpenerAESGCM(key, nonceBase []byte) (*Opener, error) {
 
 // Open decrypts ciphertext into dst, returning the plaintext.
 // The additional data is the 5-byte record header.
-// seq is advanced internally after each successful open operation.
+//
+// IMPORTANT: seq is only advanced on success. If AEAD decryption fails the
+// counter stays put so a single corrupt/misaligned record does not permanently
+// desynchronise the entire tunnel. The caller should still tear down the
+// connection on error — this is purely a safety net.
 func (o *Opener) Open(dst, ciphertext, additionalData []byte) ([]byte, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
 	nonce := o.nonce.Nonce(o.seq)
-	o.seq++
 
 	plaintext, err := o.aead.Open(dst, nonce, ciphertext, additionalData)
 	if err != nil {
-		return nil, ErrBadRecordMAC
+		o.failures++
+		return nil, fmt.Errorf("%w: expected seq=%d consecutive_failures=%d",
+			ErrBadRecordMAC, o.seq, o.failures)
 	}
+
+	o.seq++
+	o.failures = 0
 	return plaintext, nil
+}
+
+// Failures returns the number of consecutive AEAD failures seen by this opener.
+func (o *Opener) Failures() uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.failures
 }
 
 // Sequence returns the current sequence number.
@@ -239,6 +255,12 @@ type Codec struct {
 	sealer *Sealer
 	opener *Opener
 }
+
+// SealerSeq returns the current sealer sequence number.
+func (c *Codec) SealerSeq() uint64 { return c.sealer.Sequence() }
+
+// OpenerSeq returns the current opener sequence number.
+func (c *Codec) OpenerSeq() uint64 { return c.opener.Sequence() }
 
 // NewCodec creates a Codec with AES-GCM for both directions.
 // In practice, K_sess provides one key for client→relay and one for relay→client.
