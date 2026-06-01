@@ -233,7 +233,7 @@ func (c *streamConn) Write(p []byte) (int, error) {
 		data = make([]byte, needed)
 	}
 
-	data[0] = 0x02
+	data[0] = cmdTCP
 	copy(data[1:], p)
 
 	// DataFrame copies the payload, so data is safe to return to pool after the write.
@@ -279,7 +279,7 @@ func (d *Dialer) IsDead() bool {
 
 // Close sends a CLOSE command and unregisters the stream.
 func (c *streamConn) Close() error {
-	c.t.h2Eng.WriteData(c.streamID, []byte{0x03}, false)
+	c.t.h2Eng.WriteData(c.streamID, []byte{cmdClose}, false)
 	c.t.mu.Lock()
 	delete(c.t.streams, c.streamID)
 	c.t.mu.Unlock()
@@ -315,6 +315,306 @@ func (c *streamConn) SetReadDeadline(t time.Time) error {
 func (c *streamConn) SetWriteDeadline(t time.Time) error {
 	c.writeDeadline = t
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// UDP support — net.PacketConn over 8 Chimney H2 streams
+// ---------------------------------------------------------------------------
+
+// Command byte prepended to H2 DATA frame payloads so the relay can
+// distinguish TCP streams from UDP streams.
+const (
+	cmdTCP   = 0x02 // TCP data (existing)
+	cmdClose = 0x03 // Stream close
+	cmdUDP   = 0x04 // UDP datagram
+)
+
+// UDP stream allocation. 8 streams are pre-allocated per tunnel, giving
+// parallelism without per-packet stream setup overhead.
+const (
+	numUDPStreams = 8
+	udpStreamBase = 0x40000001 // High odd range avoids collision with TCP streams
+)
+
+// UDP datagram wire format within a DATA frame payload:
+//
+//	[1B cmd=0x04][1B addrType][addr][2B port][payload]
+//
+// addrType: 0x01 = IPv4 (4B), 0x03 = Domain (1B len + N bytes), 0x04 = IPv6 (16B)
+
+// udpConn implements net.PacketConn over 8 Chimney H2 UDP sub-streams.
+// Datagrams are routed to sub-streams by hash(dstAddr, dstPort), so packets
+// to the same destination stay ordered while traffic to different destinations
+// can proceed in parallel.
+type udpConn struct {
+	d       *Dialer
+	t       *tunnel
+	streams [numUDPStreams]*streamConn
+
+	mu          sync.Mutex
+	readDeadline  time.Time
+	writeDeadline time.Time
+	closed        bool
+
+	// Index of the next stream to poll in ReadFrom (round-robin).
+	nextPoll int
+}
+
+// Ensure udpConn satisfies net.PacketConn.
+var _ net.PacketConn = (*udpConn)(nil)
+
+// hashAddr returns a stream index for the given address:port.
+func hashAddr(addr string) int {
+	h := 0
+	for _, c := range addr {
+		h = h*31 + int(c)
+	}
+	return h % numUDPStreams
+}
+
+// ReadFrom reads a UDP datagram, returning the payload and source address.
+func (u *udpConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	for {
+		u.mu.Lock()
+		if u.closed {
+			u.mu.Unlock()
+			return 0, nil, net.ErrClosed
+		}
+		start := u.nextPoll
+		u.nextPoll = (u.nextPoll + 1) % numUDPStreams
+		deadline := u.readDeadline
+		u.mu.Unlock()
+
+		for i := 0; i < numUDPStreams; i++ {
+			idx := (start + i) % numUDPStreams
+			// Non-blocking check of this stream's channel
+			select {
+			case sf, ok := <-u.streams[idx].ch:
+				if !ok {
+					continue
+				}
+				payload := sf.payload
+				if len(payload) < 1 || payload[0] != cmdUDP {
+					continue
+				}
+				// Re-parse in the caller's context
+				n, addr, err := u.parseDatagram(payload, b)
+				if err != nil {
+					continue
+				}
+				return n, addr, nil
+			default:
+				continue
+			}
+		}
+
+		// All streams empty — do a blocking read on the start stream
+		// with optional deadline.
+		var timeout <-chan time.Time
+		if !deadline.IsZero() {
+			timeout = time.After(time.Until(deadline))
+		}
+		select {
+		case sf, ok := <-u.streams[start].ch:
+			if !ok {
+				continue
+			}
+			payload := sf.payload
+			if len(payload) < 1 || payload[0] != cmdUDP {
+				continue
+			}
+			n, addr, err := u.parseDatagram(payload, b)
+			if err != nil {
+				continue
+			}
+			return n, addr, nil
+		case <-timeout:
+			return 0, nil, &net.OpError{Op: "read", Net: "udp", Err: &timeoutError{}}
+		case <-u.t.quit:
+			return 0, nil, io.ErrClosedPipe
+		}
+	}
+}
+
+// parseDatagram extracts a UDP datagram from a DATA frame payload.
+func (u *udpConn) parseDatagram(payload []byte, b []byte) (int, net.Addr, error) {
+	if len(payload) < 4 || payload[0] != cmdUDP {
+		return 0, nil, fmt.Errorf("chimney: invalid UDP frame")
+	}
+	addrType := payload[1]
+	var host string
+	var data []byte
+	switch addrType {
+	case 0x01: // IPv4
+		if len(payload) < 8 {
+			return 0, nil, fmt.Errorf("chimney: truncated IPv4 UDP frame")
+		}
+		host = net.IP(payload[2:6]).String()
+		port := int(payload[6])<<8 | int(payload[7])
+		data = payload[8:]
+		n := copy(b, data)
+		return n, &net.UDPAddr{IP: net.ParseIP(host), Port: port}, nil
+	case 0x03: // Domain
+		if len(payload) < 5 {
+			return 0, nil, fmt.Errorf("chimney: truncated domain UDP frame")
+		}
+		nameLen := int(payload[2])
+		if len(payload) < 5+nameLen {
+			return 0, nil, fmt.Errorf("chimney: truncated domain UDP frame")
+		}
+		host = string(payload[3 : 3+nameLen])
+		addrEnd := 3 + nameLen
+		port := int(payload[addrEnd])<<8 | int(payload[addrEnd+1])
+		data = payload[addrEnd+2:]
+		n := copy(b, data)
+		return n, &net.UDPAddr{IP: net.ParseIP(host), Port: port}, nil
+	case 0x04: // IPv6
+		if len(payload) < 20 {
+			return 0, nil, fmt.Errorf("chimney: truncated IPv6 UDP frame")
+		}
+		host = net.IP(payload[2:18]).String()
+		port := int(payload[18])<<8 | int(payload[19])
+		data = payload[20:]
+		n := copy(b, data)
+		return n, &net.UDPAddr{IP: net.ParseIP(host), Port: port}, nil
+	default:
+		return 0, nil, fmt.Errorf("chimney: unknown UDP addr type %d", addrType)
+	}
+}
+
+// encodeDatagram builds the wire format for a UDP datagram.
+func encodeDatagram(addr net.Addr, b []byte) []byte {
+	udpAddr, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return nil
+	}
+	ip := udpAddr.IP.To4()
+	if ip != nil {
+		// IPv4: 1B cmd + 1B type + 4B ip + 2B port + payload
+		buf := make([]byte, 1+1+4+2+len(b))
+		buf[0] = cmdUDP
+		buf[1] = 0x01
+		copy(buf[2:6], ip)
+		buf[6] = byte(udpAddr.Port >> 8)
+		buf[7] = byte(udpAddr.Port)
+		copy(buf[8:], b)
+		return buf
+	}
+	ip6 := udpAddr.IP.To16()
+	if ip6 != nil {
+		buf := make([]byte, 1+1+16+2+len(b))
+		buf[0] = cmdUDP
+		buf[1] = 0x04
+		copy(buf[2:18], ip6)
+		buf[18] = byte(udpAddr.Port >> 8)
+		buf[19] = byte(udpAddr.Port)
+		copy(buf[20:], b)
+		return buf
+	}
+	return nil
+}
+
+// WriteTo sends a UDP datagram to the given address.
+func (u *udpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	u.mu.Lock()
+	if u.closed {
+		u.mu.Unlock()
+		return 0, net.ErrClosed
+	}
+	u.mu.Unlock()
+
+	data := encodeDatagram(addr, b)
+	if data == nil {
+		return 0, fmt.Errorf("chimney: unsupported address type %T", addr)
+	}
+
+	idx := hashAddr(addr.String())
+	_, err := u.streams[idx].Write(data)
+	if err != nil {
+		return 0, err
+	}
+	return len(b), nil
+}
+
+// Close closes all UDP sub-streams.
+func (u *udpConn) Close() error {
+	u.mu.Lock()
+	if u.closed {
+		u.mu.Unlock()
+		return net.ErrClosed
+	}
+	u.closed = true
+	u.mu.Unlock()
+
+	for _, c := range u.streams {
+		c.Close()
+	}
+	return nil
+}
+
+func (u *udpConn) LocalAddr() net.Addr  { return addr{"chimney-udp", "client"} }
+func (u *udpConn) RemoteAddr() net.Addr { return addr{"chimney-udp", "relay"} }
+
+func (u *udpConn) SetDeadline(t time.Time) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.readDeadline = t
+	u.writeDeadline = t
+	return nil
+}
+
+func (u *udpConn) SetReadDeadline(t time.Time) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.readDeadline = t
+	return nil
+}
+
+func (u *udpConn) SetWriteDeadline(t time.Time) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.writeDeadline = t
+	return nil
+}
+
+type timeoutError struct{}
+
+func (e *timeoutError) Error() string   { return "i/o timeout" }
+func (e *timeoutError) Timeout() bool   { return true }
+func (e *timeoutError) Temporary() bool { return true }
+
+// ListenPacket opens a UDP packet connection over the Chimney tunnel.
+// Pre-allocates 8 H2 UDP sub-streams for parallel datagram delivery.
+func (d *Dialer) ListenPacket(ctx context.Context) (net.PacketConn, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, net.ErrClosed
+	}
+	// Use the first tunnel in the pool for UDP.
+	if len(d.pool) == 0 {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("chimney: no tunnels available; call DialContext first")
+	}
+	t := d.pool[0]
+	d.mu.Unlock()
+
+	u := &udpConn{d: d, t: t}
+
+	for i := 0; i < numUDPStreams; i++ {
+		streamID := udpStreamBase + uint32(i*2) // odd IDs for client-initiated streams
+		ch := make(chan *streamFrame, 256)
+		t.mu.Lock()
+		t.streams[streamID] = ch
+		t.mu.Unlock()
+		u.streams[i] = &streamConn{
+			t:        t,
+			streamID: streamID,
+			ch:       ch,
+		}
+	}
+
+	return u, nil
 }
 
 // newTunnel establishes a single H2-tunneled connection to the relay.

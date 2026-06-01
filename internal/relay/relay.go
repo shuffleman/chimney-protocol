@@ -995,10 +995,159 @@ func (p *tunnelConnPool) closeAll() {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// UDP backend — per-stream UDP socket for Chimney UDP sub-streams
+// ---------------------------------------------------------------------------
+
+// udpBackend manages a UDP socket for one Chimney UDP sub-stream.
+// The client hashes 5-tuples to pick a stream; the relay creates one UDP
+// socket per stream to handle datagrams to any destination.
+type udpBackend struct {
+	conn     *net.UDPConn
+	streamID uint32
+	h2Eng    *h2engine.Engine
+	logger   *slog.Logger
+	quit     chan struct{}
+}
+
+// startUDPBackend creates a UDP socket and begins forwarding received
+// datagrams back to the client as H2 DATA frames.
+func (s *Server) startUDPBackend(streamID uint32, h2Eng *h2engine.Engine, logger *slog.Logger) (*udpBackend, error) {
+	udpConn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		return nil, fmt.Errorf("relay: udp listen: %w", err)
+	}
+	ub := &udpBackend{
+		conn:     udpConn,
+		streamID: streamID,
+		h2Eng:    h2Eng,
+		logger:   logger,
+		quit:     make(chan struct{}),
+	}
+	go ub.readLoop()
+	return ub, nil
+}
+
+// readLoop reads datagrams from the UDP socket and sends them to the client.
+// Wire format: [0x04 cmd][1B addrType][addr][2B port][payload]
+func (ub *udpBackend) readLoop() {
+	buf := make([]byte, 65536)
+	for {
+		select {
+		case <-ub.quit:
+			return
+		default:
+		}
+		ub.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		n, remoteAddr, err := ub.conn.ReadFromUDP(buf)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			ub.logger.Debug("udp backend read error", "stream_id", ub.streamID, "error", err)
+			return
+		}
+		frame := encodeUDPResponse(remoteAddr, buf[:n])
+		if frame == nil {
+			continue
+		}
+		if err := ub.h2Eng.WriteData(ub.streamID, frame, false); err != nil {
+			ub.logger.Debug("udp backend write frame error", "stream_id", ub.streamID, "error", err)
+			return
+		}
+	}
+}
+
+// encodeUDPResponse builds the wire format for a UDP response datagram.
+func encodeUDPResponse(addr *net.UDPAddr, payload []byte) []byte {
+	ip := addr.IP.To4()
+	if ip != nil {
+		buf := make([]byte, 1+1+4+2+len(payload))
+		buf[0] = 0x04
+		buf[1] = 0x01 // IPv4
+		copy(buf[2:6], ip)
+		buf[6] = byte(addr.Port >> 8)
+		buf[7] = byte(addr.Port)
+		copy(buf[8:], payload)
+		return buf
+	}
+	ip6 := addr.IP.To16()
+	if ip6 != nil {
+		buf := make([]byte, 1+1+16+2+len(payload))
+		buf[0] = 0x04
+		buf[1] = 0x04 // IPv6
+		copy(buf[2:18], ip6)
+		buf[18] = byte(addr.Port >> 8)
+		buf[19] = byte(addr.Port)
+		copy(buf[20:], payload)
+		return buf
+	}
+	return nil
+}
+
+// parseUDPAddr extracts the destination from a UDP DATA frame payload
+// (the bytes after the 0x04 command byte).
+func parseUDPAddr(cmdData []byte) (*net.UDPAddr, []byte, error) {
+	if len(cmdData) < 3 {
+		return nil, nil, fmt.Errorf("relay: truncated UDP frame")
+	}
+	var host string
+	var rest []byte
+	switch cmdData[0] {
+	case 0x01: // IPv4
+		if len(cmdData) < 7 {
+			return nil, nil, fmt.Errorf("relay: truncated IPv4 UDP frame")
+		}
+		port := int(cmdData[5])<<8 | int(cmdData[6])
+		host = net.IP(cmdData[1:5]).String()
+		rest = cmdData[7:]
+		return &net.UDPAddr{IP: net.ParseIP(host), Port: port}, rest, nil
+	case 0x03: // Domain
+		if len(cmdData) < 3 {
+			return nil, nil, fmt.Errorf("relay: truncated domain UDP frame")
+		}
+		nameLen := int(cmdData[1])
+		addrEnd := 2 + nameLen
+		if len(cmdData) < addrEnd+2 {
+			return nil, nil, fmt.Errorf("relay: truncated domain UDP frame")
+		}
+		port := int(cmdData[addrEnd])<<8 | int(cmdData[addrEnd+1])
+		host = string(cmdData[2 : 2+nameLen])
+		rest = cmdData[addrEnd+2:]
+		return &net.UDPAddr{IP: net.ParseIP(host), Port: port}, rest, nil
+	case 0x04: // IPv6
+		if len(cmdData) < 19 {
+			return nil, nil, fmt.Errorf("relay: truncated IPv6 UDP frame")
+		}
+		port := int(cmdData[17])<<8 | int(cmdData[18])
+		host = net.IP(cmdData[1:17]).String()
+		rest = cmdData[19:]
+		return &net.UDPAddr{IP: net.ParseIP(host), Port: port}, rest, nil
+	default:
+		return nil, nil, fmt.Errorf("relay: unknown UDP addr type %d", cmdData[0])
+	}
+}
+
+func (ub *udpBackend) close() {
+	select {
+	case <-ub.quit:
+	default:
+		close(ub.quit)
+	}
+	ub.conn.Close()
+}
+
 // handleTunnel handles the H2 tunnel after swap with traffic profile pacing.
 func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error {
 	pool := newTunnelConnPool(s.config.BackendDialer, s.dialSem, s.connSem)
 	defer pool.closeAll()
+
+	udpBackends := make(map[uint32]*udpBackend)
+	defer func() {
+		for _, ub := range udpBackends {
+			ub.close()
+		}
+	}()
 
 	var trafficProfile *profile.Model
 	if s.config.EnableProfiling {
@@ -1029,6 +1178,38 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 			}
 			cmd := payload[0]
 			cmdData := payload[1:]
+
+			// UDP streams (0x04) — create/use a UDP socket, send datagram.
+			if cmd == 0x04 {
+				ub, exists := udpBackends[fh.StreamID]
+				if !exists {
+					var err error
+					ub, err = s.startUDPBackend(fh.StreamID, h2Eng, logger)
+					if err != nil {
+						logger.Debug("udp backend creation failed", "error", err)
+						continue
+					}
+					udpBackends[fh.StreamID] = ub
+				}
+				addr, data, err := parseUDPAddr(cmdData)
+				if err != nil {
+					logger.Debug("udp parse addr failed", "error", err)
+					continue
+				}
+				if _, err := ub.conn.WriteToUDP(data, addr); err != nil {
+					logger.Debug("udp sendto failed", "error", err)
+				}
+				continue
+			}
+
+			// CLOSE for UDP streams.
+			if cmd == 0x03 {
+				if ub, exists := udpBackends[fh.StreamID]; exists {
+					ub.close()
+					delete(udpBackends, fh.StreamID)
+					continue
+				}
+			}
 
 			// Buffer data for streams whose CONNECT is still in progress.
 			if pool.isPending(fh.StreamID) {
