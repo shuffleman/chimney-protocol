@@ -48,7 +48,7 @@ const (
 	AuthReadTimeout = 5 * time.Second
 
 	// TCPBufferSize is the buffer size for TCP relay.
-	TCPBufferSize = 32 * 1024
+	TCPBufferSize = 64 * 1024
 
 	// MaxConcurrentBackendDials limits simultaneous backend TCP dials
 	// to prevent overwhelming the backend's listen backlog (TCP SYN flood).
@@ -1099,7 +1099,7 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 
 // readBackend reads from a backend connection and sends data back as H2 DATA frames.
 func (s *Server) readBackend(streamID uint32, backendConn net.Conn, h2Eng *h2engine.Engine, logger *slog.Logger) {
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, 64*1024)
 	for {
 		n, err := backendConn.Read(buf)
 		if n > 0 {

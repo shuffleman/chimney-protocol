@@ -38,12 +38,20 @@ const (
 	AESGCMTagSize           = 16
 
 	// MaxPlaintextLen is the maximum length of a single record's plaintext payload.
-	// Must be >= max H2 frame size (FrameHeaderLen + MaxFrameSize = 9 + 16384 = 16393).
-	MaxPlaintextLen = 16400
+	// Must be >= max H2 frame size (FrameHeaderLen + MaxFrameSize = 9 + 65536 = 65545).
+	MaxPlaintextLen = 66000
 
-	// MaxRecordLen is the maximum on-the-wire record size.
-	MaxRecordLen = RecordHeaderLen + MaxPlaintextLen + AESGCMTagSize // ~16KiB + overhead
+	// MaxRecordLen is the maximum on-the-wire record size (5 + 66000 + 16 ≈ 66 KiB).
+	MaxRecordLen = RecordHeaderLen + MaxPlaintextLen + AESGCMTagSize
 )
+
+// readBufPool reuses the tmp read buffer in RecordReader.ReadRecord.
+var readBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, MaxRecordLen)
+		return &buf
+	},
+}
 
 var (
 	// ErrRecordTooShort is returned when a record is shorter than the header.
@@ -405,11 +413,13 @@ func (rr *RecordReader) ReadRecord() ([]byte, error) {
 		}
 
 		// Need more data
-		tmp := make([]byte, MaxRecordLen)
+		tmpPtr := readBufPool.Get().(*[]byte)
+		tmp := *tmpPtr
 		n, err := rr.reader.Read(tmp)
 		if n > 0 {
 			rr.buf = append(rr.buf, tmp[:n]...)
 		}
+		readBufPool.Put(tmpPtr)
 		if err != nil {
 			if err == io.EOF && len(rr.buf) > 0 {
 				// Have partial data but hit EOF

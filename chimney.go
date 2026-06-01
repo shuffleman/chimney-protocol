@@ -104,6 +104,11 @@ type Config struct {
 	// frame dispatch across multiple TCP sockets. Set to 1 for single-connection
 	// mode (lowest resource usage, sufficient for low concurrency).
 	PoolSize int
+
+	// TCPBufferSize sets the TCP read/write buffer size in bytes for each tunnel
+	// connection (default: 262144 = 256 KiB). On memory-constrained platforms
+	// like iOS, reduce to 65536 to save ~384 KiB per tunnel.
+	TCPBufferSize int
 }
 
 // tunnel is a single H2 connection to the relay. The Dialer maintains a pool
@@ -142,6 +147,15 @@ type Dialer struct {
 type streamFrame struct {
 	fh      *h2engine.FrameHeader
 	payload []byte
+}
+
+// writeBufPool reuses Write buffers up to DefaultMaxFrameSize+1 bytes.
+// Larger buffers fall through to heap allocation.
+var writeBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 65536+1)
+		return &buf
+	},
 }
 
 // streamConn wraps a single H2 stream as a net.Conn.
@@ -207,10 +221,22 @@ func (c *streamConn) Read(p []byte) (int, error) {
 // Write writes data to the stream, prefixing with 0x02 DATA command.
 // If a traffic profile is configured, the record is padded to the target size.
 func (c *streamConn) Write(p []byte) (int, error) {
-	data := make([]byte, 1+len(p))
+	needed := 1 + len(p)
+
+	// Use pool for typical frame sizes; allocate directly for oversized writes.
+	var data []byte
+	var poolPtr *[]byte
+	if needed <= 65537 {
+		poolPtr = writeBufPool.Get().(*[]byte)
+		data = (*poolPtr)[:needed]
+	} else {
+		data = make([]byte, needed)
+	}
+
 	data[0] = 0x02
 	copy(data[1:], p)
 
+	// DataFrame copies the payload, so data is safe to return to pool after the write.
 	var targetSize uint16
 	if c.t.prof != nil {
 		if c.t.padTarget > 0 {
@@ -220,14 +246,19 @@ func (c *streamConn) Write(p []byte) (int, error) {
 		}
 	}
 
+	var err error
 	if targetSize > 0 {
-		if err := c.t.h2Eng.WritePaddedRecord(c.streamID, data, targetSize, false); err != nil {
-			return 0, err
-		}
+		err = c.t.h2Eng.WritePaddedRecord(c.streamID, data, targetSize, false)
 	} else {
-		if err := c.t.h2Eng.WriteData(c.streamID, data, false); err != nil {
-			return 0, err
-		}
+		err = c.t.h2Eng.WriteData(c.streamID, data, false)
+	}
+
+	if poolPtr != nil {
+		writeBufPool.Put(poolPtr)
+	}
+
+	if err != nil {
+		return 0, err
 	}
 	return len(p), nil
 }
@@ -281,9 +312,13 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 		return nil, fmt.Errorf("chimney: connect to relay: %w", err)
 	}
 
+	tcpBufSize := config.TCPBufferSize
+	if tcpBufSize <= 0 {
+		tcpBufSize = 256 * 1024
+	}
 	if tcpConn, ok := rawConn.(*net.TCPConn); ok {
-		tcpConn.SetReadBuffer(256 * 1024)
-		tcpConn.SetWriteBuffer(256 * 1024)
+		tcpConn.SetReadBuffer(tcpBufSize)
+		tcpConn.SetWriteBuffer(tcpBufSize)
 		tcpConn.SetNoDelay(true)
 	}
 

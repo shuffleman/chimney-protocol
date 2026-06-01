@@ -78,8 +78,10 @@ const (
 	// H2ConnectionPreface is the client connection preface.
 	H2ConnectionPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
-	// DefaultMaxFrameSize is the default maximum frame payload size (16 KiB).
-	DefaultMaxFrameSize = 16384
+	// DefaultMaxFrameSize is the default maximum frame payload size.
+	// 64 KiB reduces per-byte AEAD/syscall overhead by 4× vs the RFC 7540 default
+	// of 16 KiB. iOS clients can lower this via Settings to reduce per-tunnel memory.
+	DefaultMaxFrameSize = 65536
 
 	// FrameHeaderLen is the HTTP/2 frame header length.
 	FrameHeaderLen = 9
