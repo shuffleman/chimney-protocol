@@ -369,8 +369,14 @@ func (rw *RecordWriter) WriteRecord(plaintext []byte) error {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
 	record := rw.codec.EncodeRecord(plaintext)
-	_, err := rw.writer.Write(record)
-	return err
+	for len(record) > 0 {
+		n, err := rw.writer.Write(record)
+		if err != nil {
+			return err
+		}
+		record = record[n:]
+	}
+	return nil
 }
 
 // Close is a no-op for the mutex-based RecordWriter.
