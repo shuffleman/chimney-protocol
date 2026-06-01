@@ -101,6 +101,11 @@ const (
 	// whitelisted site, making traffic semantically indistinguishable from
 	// real browsing under deep packet inspection.
 	DilutionStreamID = 0x0FFFFFFD
+
+	// RecvWindowLowWaterPercent triggers WINDOW_UPDATE when the receive window
+	// falls below this fraction of the initial window. 50% balances responsiveness
+	// with avoiding excessive WINDOW_UPDATE frames.
+	RecvWindowLowWaterPercent = 50
 )
 
 var (
@@ -621,6 +626,17 @@ func (e *Engine) WriteCombinedRecord(frames ...[]byte) error {
 	return e.recordWriter.WriteRecord(combined)
 }
 
+// sendWindowUpdate sends a WINDOW_UPDATE frame to restore the stream's receive
+// window. Must be called with e.mu held (or from a context that guarantees
+// exclusive access to the stream).
+func (e *Engine) sendWindowUpdate(streamID uint32, increment uint32) error {
+	if e.recordWriter == nil {
+		return errors.New("h2engine: record writer not set")
+	}
+	frame := WindowUpdateFrame(streamID, increment)
+	return e.recordWriter.WriteRecord(frame)
+}
+
 // IsPaddingStream returns true if the stream ID is the reserved padding stream.
 // Used by the relay to filter out padding frames before dispatching.
 func IsPaddingStream(streamID uint32) bool {
@@ -690,7 +706,48 @@ func (e *Engine) ReadFrame() (*FrameHeader, []byte, error) {
 				payload := make([]byte, fh.Length)
 				copy(payload, e.readBuf[FrameHeaderLen:totalLen])
 				e.readBuf = e.readBuf[totalLen:]
+
+				// Receive flow control: track recv window for DATA frames
+				// on real streams (skip padding/dilution).
+				var needWU bool
+				var wuStreamID uint32
+				var wuIncrement uint32
+				if fh.Type == FrameData && fh.StreamID != PaddingStreamID && fh.StreamID != DilutionStreamID {
+					stream, exists := e.streams[fh.StreamID]
+					if !exists {
+						initialWindow := int32(65535)
+						if e.settings.InitialWindowSize != nil {
+							initialWindow = int32(*e.settings.InitialWindowSize)
+						}
+						stream = &Stream{
+							ID:         fh.StreamID,
+							State:      StreamOpen,
+							Window:     initialWindow,
+							RecvWindow: initialWindow,
+						}
+						e.streams[fh.StreamID] = stream
+					}
+					stream.RecvWindow -= int32(fh.Length)
+					initialWindow := int32(65535)
+					if e.settings.InitialWindowSize != nil {
+						initialWindow = int32(*e.settings.InitialWindowSize)
+					}
+					lowWater := initialWindow * RecvWindowLowWaterPercent / 100
+					if stream.RecvWindow < lowWater {
+						wuIncrement = uint32(initialWindow - stream.RecvWindow)
+						stream.RecvWindow = initialWindow
+						needWU = true
+						wuStreamID = fh.StreamID
+					}
+				}
 				e.mu.Unlock()
+
+				if needWU {
+					if err := e.sendWindowUpdate(wuStreamID, wuIncrement); err != nil {
+						return nil, nil, err
+					}
+				}
+
 				return fh, payload, nil
 			}
 		}

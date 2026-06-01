@@ -43,6 +43,10 @@ const (
 
 	// MaxRecordLen is the maximum on-the-wire record size (5 + 66000 + 16 ≈ 66 KiB).
 	MaxRecordLen = RecordHeaderLen + MaxPlaintextLen + AESGCMTagSize
+
+	// MaxBufSize caps the RecordReader internal buffer to prevent unbounded growth
+	// when the reader stalls or an attacker sends partial records.
+	MaxBufSize = MaxRecordLen * 4
 )
 
 // readBufPool reuses the tmp read buffer in RecordReader.ReadRecord.
@@ -59,6 +63,9 @@ var (
 
 	// ErrRecordOverflow is returned when a record's length field exceeds MaxRecordLen.
 	ErrRecordOverflow = errors.New("record: length field exceeds maximum")
+
+	// ErrBufferOverflow is returned when the internal buffer exceeds MaxBufSize.
+	ErrBufferOverflow = errors.New("record: internal buffer limit exceeded")
 
 	// ErrBadRecordMAC is returned when AEAD decryption (Open) fails.
 	ErrBadRecordMAC = errors.New("record: bad record MAC")
@@ -413,13 +420,16 @@ func (rr *RecordReader) ReadRecord() ([]byte, error) {
 		}
 
 		// Need more data
-		tmpPtr := readBufPool.Get().(*[]byte)
-		tmp := *tmpPtr
-		n, err := rr.reader.Read(tmp)
-		if n > 0 {
-			rr.buf = append(rr.buf, tmp[:n]...)
-		}
-		readBufPool.Put(tmpPtr)
+			if len(rr.buf) >= MaxBufSize {
+				return nil, ErrBufferOverflow
+			}
+			tmpPtr := readBufPool.Get().(*[]byte)
+			tmp := *tmpPtr
+			n, err := rr.reader.Read(tmp)
+			if n > 0 {
+				rr.buf = append(rr.buf, tmp[:n]...)
+			}
+			readBufPool.Put(tmpPtr)
 		if err != nil {
 			if err == io.EOF && len(rr.buf) > 0 {
 				// Have partial data but hit EOF
