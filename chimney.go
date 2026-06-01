@@ -998,7 +998,10 @@ func (t *tunnel) dispatchFrames() {
 		ch, ok := t.streams[fh.StreamID]
 		t.mu.Unlock()
 		if ok {
-			ch <- &streamFrame{fh, payload}
+			select {
+			case ch <- &streamFrame{fh, payload}:
+			case <-t.quit:
+			}
 		}
 	}
 }
