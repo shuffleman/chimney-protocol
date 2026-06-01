@@ -875,10 +875,20 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 // across all H2 tunnels to prevent overwhelming the backend server's listen backlog.
 const MaxBackendConnsGlobal = 128
 
+// maxPendingBytesPerStream caps the buffered data for a single pending stream.
+// When exceeded, the stream is rejected with RST_STREAM to prevent OOM during
+// high-concurrency upload scenarios where many streams block on connSem.
+const maxPendingBytesPerStream = 256 * 1024
+
+// maxPendingStreams caps the number of streams waiting for a backend connection.
+// Beyond this limit, new CONNECT requests are refused with REFUSED_STREAM.
+const maxPendingStreams = 256
+
 // tunnelConnPool manages backend connections for tunneled streams.
 type tunnelConnPool struct {
 	mu            sync.Mutex
 	streams       map[uint32]net.Conn
+	writeChs      map[uint32]chan<- []byte // per-stream write channels
 	pending       map[uint32][][]byte
 	dest          string
 	backendDialer func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -889,6 +899,7 @@ type tunnelConnPool struct {
 func newTunnelConnPool(backendDialer func(ctx context.Context, network, addr string) (net.Conn, error), dialSem, connSem chan struct{}) *tunnelConnPool {
 	return &tunnelConnPool{
 		streams:       make(map[uint32]net.Conn),
+		writeChs:      make(map[uint32]chan<- []byte),
 		pending:       make(map[uint32][][]byte),
 		backendDialer: backendDialer,
 		dialSem:       dialSem,
@@ -945,6 +956,10 @@ func (p *tunnelConnPool) closeStream(streamID uint32) {
 		conn.Close()
 		delete(p.streams, streamID)
 	}
+	if ch, ok := p.writeChs[streamID]; ok {
+		close(ch)
+		delete(p.writeChs, streamID)
+	}
 }
 
 func (p *tunnelConnPool) addPending(streamID uint32) {
@@ -953,14 +968,24 @@ func (p *tunnelConnPool) addPending(streamID uint32) {
 	p.pending[streamID] = nil
 }
 
-func (p *tunnelConnPool) bufferForPending(streamID uint32, data []byte) {
+func (p *tunnelConnPool) bufferForPending(streamID uint32, data []byte) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, ok := p.pending[streamID]; ok {
-		d := make([]byte, len(data))
-		copy(d, data)
-		p.pending[streamID] = append(p.pending[streamID], d)
+	bufs, ok := p.pending[streamID]
+	if !ok {
+		return false
 	}
+	total := 0
+	for _, d := range bufs {
+		total += len(d)
+	}
+	if total+len(data) > maxPendingBytesPerStream {
+		return false
+	}
+	d := make([]byte, len(data))
+	copy(d, data)
+	p.pending[streamID] = append(bufs, d)
+	return true
 }
 
 func (p *tunnelConnPool) isPending(streamID uint32) bool {
@@ -968,6 +993,18 @@ func (p *tunnelConnPool) isPending(streamID uint32) bool {
 	defer p.mu.Unlock()
 	_, ok := p.pending[streamID]
 	return ok
+}
+
+func (p *tunnelConnPool) pendingCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.pending)
+}
+
+func (p *tunnelConnPool) removePending(streamID uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.pending, streamID)
 }
 
 func (p *tunnelConnPool) flushPending(streamID uint32, conn net.Conn, logger *slog.Logger) {
@@ -982,6 +1019,45 @@ func (p *tunnelConnPool) flushPending(streamID uint32, conn net.Conn, logger *sl
 	}
 }
 
+// registerWriteCh creates a buffered write channel for a stream and returns it.
+// The caller must start a write goroutine that drains this channel.
+func (p *tunnelConnPool) registerWriteCh(streamID uint32) chan []byte {
+	ch := make(chan []byte, 64)
+	p.mu.Lock()
+	p.writeChs[streamID] = ch
+	p.mu.Unlock()
+	return ch
+}
+
+// writeToStream sends data to the stream's write goroutine via its channel.
+// Blocks until the write goroutine accepts the data, providing natural
+// backpressure that is per-stream rather than blocking the entire tunnel.
+// Returns false if the stream is not registered (stream already closed).
+func (p *tunnelConnPool) writeToStream(streamID uint32, data []byte) bool {
+	p.mu.Lock()
+	ch, ok := p.writeChs[streamID]
+	p.mu.Unlock()
+	if !ok {
+		return false
+	}
+	d := make([]byte, len(data))
+	copy(d, data)
+	ch <- d
+	return true
+}
+
+// writeBackend drains the write channel and writes each chunk to the backend.
+// Runs in its own goroutine, paired with readBackend.
+func (s *Server) writeBackend(streamID uint32, backendConn net.Conn, ch <-chan []byte, logger *slog.Logger, pool *tunnelConnPool) {
+	for data := range ch {
+		if _, err := backendConn.Write(data); err != nil {
+			logger.Debug("backend write failed", "error", err, "stream_id", streamID)
+			pool.closeStream(streamID)
+			return
+		}
+	}
+}
+
 func (p *tunnelConnPool) closeAll() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -989,6 +1065,10 @@ func (p *tunnelConnPool) closeAll() {
 	for id, conn := range p.streams {
 		conn.Close()
 		delete(p.streams, id)
+	}
+	for id, ch := range p.writeChs {
+		close(ch)
+		delete(p.writeChs, id)
 	}
 	for id := range p.pending {
 		delete(p.pending, id)
@@ -1173,7 +1253,7 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 
 		switch fh.Type {
 		case h2engine.FrameData:
-			if payload == nil || len(payload) < 1 {
+			if len(payload) < 1 {
 				continue
 			}
 			cmd := payload[0]
@@ -1212,35 +1292,42 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 			}
 
 			// Buffer data for streams whose CONNECT is still in progress.
+			// Reject streams that exceed the per-stream pending buffer limit
+			// to prevent OOM when connSem is saturated during heavy upload.
 			if pool.isPending(fh.StreamID) {
-				pool.bufferForPending(fh.StreamID, payload)
+				if !pool.bufferForPending(fh.StreamID, payload) {
+					logger.Debug("pending buffer overflow, rejecting stream", "stream_id", fh.StreamID)
+					rstFrame := h2engine.RSTStreamFrame(fh.StreamID, h2engine.H2ErrEnhanceYourCalm)
+					h2Eng.WriteRawFrame(rstFrame)
+					pool.removePending(fh.StreamID)
+				}
 				continue
 			}
 
-			// If stream already has a backend, all DATA frames carry data
-			// (or CLOSE). The 0x02 chimney prefix may be absent on continuation
-			// frames produced by H2 fragmentation of a single chimney write.
-			if backendConn, err := pool.getOrCreate(fh.StreamID); err == nil {
+			// If stream already has a backend, dispatch via per-stream write
+			// channel to avoid head-of-line blocking in the H2 frame loop.
+			if _, err := pool.getOrCreate(fh.StreamID); err == nil {
 				if cmd == 0x03 {
 					logger.Debug("CLOSE stream", "stream_id", fh.StreamID)
 					pool.closeStream(fh.StreamID)
 				} else if cmd == 0x02 {
-					if _, err := backendConn.Write(cmdData); err != nil {
-						logger.Debug("backend write failed", "error", err)
-						pool.closeStream(fh.StreamID)
-					}
+					pool.writeToStream(fh.StreamID, cmdData)
 				} else {
-					// Continuation frame: entire payload is raw data.
-					if _, err := backendConn.Write(payload); err != nil {
-						logger.Debug("backend write failed", "error", err)
-						pool.closeStream(fh.StreamID)
-					}
+					pool.writeToStream(fh.StreamID, payload)
 				}
 				continue
 			}
 
 			// No backend yet — expect CONNECT (0x01).
+			// Reject when too many streams are already waiting for a backend
+			// slot — prevents unbounded memory growth under heavy load.
 			if cmd == 0x01 {
+				if pool.pendingCount() >= maxPendingStreams {
+					logger.Debug("too many pending streams, rejecting CONNECT", "stream_id", fh.StreamID)
+					rstFrame := h2engine.RSTStreamFrame(fh.StreamID, h2engine.H2ErrRefusedStream)
+					h2Eng.WriteRawFrame(rstFrame)
+					continue
+				}
 				dest := string(cmdData)
 				logger.Debug("CONNECT", "stream_id", fh.StreamID, "dest", dest)
 				pool.addPending(fh.StreamID)
@@ -1248,6 +1335,7 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 					backendConn, err := pool.createForStream(sid, destination)
 					if err != nil {
 						logger.Debug("backend connect failed", "error", err)
+						pool.removePending(sid)
 						rstFrame := h2engine.RSTStreamFrame(sid, h2engine.H2ErrRefusedStream)
 						h2Eng.WriteRawFrame(rstFrame)
 						return
@@ -1256,6 +1344,8 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 					if err := h2Eng.WriteData(sid, []byte{0x01}, false); err != nil {
 						logger.Debug("failed to send CONNECT_OK", "error", err)
 					}
+					writeCh := pool.registerWriteCh(sid)
+					go s.writeBackend(sid, backendConn, writeCh, logger, pool)
 					pool.flushPending(sid, backendConn, logger)
 					s.readBackend(sid, backendConn, h2Eng, logger)
 				}(fh.StreamID, dest)
