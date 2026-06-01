@@ -237,6 +237,11 @@ func (c *streamConn) Write(p []byte) (int, error) {
 	copy(data[1:], p)
 
 	// DataFrame copies the payload, so data is safe to return to pool after the write.
+	// Defer the Put so the buffer is reclaimed even if the write panics.
+	if poolPtr != nil {
+		defer writeBufPool.Put(poolPtr)
+	}
+
 	var targetSize uint16
 	if c.t.prof != nil {
 		if c.t.padTarget > 0 {
@@ -251,10 +256,6 @@ func (c *streamConn) Write(p []byte) (int, error) {
 		err = c.t.h2Eng.WritePaddedRecord(c.streamID, data, targetSize, false)
 	} else {
 		err = c.t.h2Eng.WriteData(c.streamID, data, false)
-	}
-
-	if poolPtr != nil {
-		writeBufPool.Put(poolPtr)
 	}
 
 	if err != nil {
@@ -282,7 +283,19 @@ func (c *streamConn) Close() error {
 	c.t.mu.Lock()
 	delete(c.t.streams, c.streamID)
 	c.t.mu.Unlock()
-	return nil
+	// Drain buffered frames so payloads can be GC'd immediately.
+	// The channel is not closed here — closing would race with
+	// dispatchFrames, which may have already fetched the channel
+	// reference. The channel is GC'd when this streamConn goes out
+	// of scope, and any remaining buffered frames at tunnel shutdown
+	// are cleaned up by closeTunnel.
+	for {
+		select {
+		case <-c.ch:
+		default:
+			return nil
+		}
+	}
 }
 
 func (c *streamConn) LocalAddr() net.Addr  { return addr{"chimney", "client"} }
@@ -685,10 +698,7 @@ func (t *tunnel) dispatchFrames() {
 		ch, ok := t.streams[fh.StreamID]
 		t.mu.Unlock()
 		if ok {
-			select {
-			case ch <- &streamFrame{fh, payload}:
-			default:
-			}
+			ch <- &streamFrame{fh, payload}
 		}
 	}
 }
