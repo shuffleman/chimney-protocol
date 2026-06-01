@@ -964,15 +964,12 @@ func (t *tunnel) closeTunnel() error {
 	}
 	t.closed = true
 	close(t.quit)
-
-	for _, ch := range t.streams {
-		close(ch)
-	}
-	t.streams = nil
 	t.mu.Unlock()
 
 	t.recWriter.Close()
-	return t.rawConn.Close()
+	err := t.rawConn.Close()
+	<-t.dead
+	return err
 }
 
 // dispatchFrames reads frames from the H2 engine and routes them to per-stream channels.
@@ -981,6 +978,12 @@ func (t *tunnel) dispatchFrames() {
 	for {
 		select {
 		case <-t.quit:
+			t.mu.Lock()
+			for _, ch := range t.streams {
+				close(ch)
+			}
+			t.streams = make(map[uint32]chan *streamFrame)
+			t.mu.Unlock()
 			return
 		default:
 		}
