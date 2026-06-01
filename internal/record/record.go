@@ -177,6 +177,17 @@ func (s *Sealer) Sequence() uint64 {
 	return s.seq
 }
 
+// rollbackSeq decrements the sequence counter by 1.
+// Call this when a write fails after Seal already incremented the counter,
+// so the next Seal uses the same seq the receiver expects.
+func (s *Sealer) rollbackSeq() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seq > 0 {
+		s.seq--
+	}
+}
+
 // Opener handles AEAD opening (decryption) of record payloads.
 type Opener struct {
 	aead  cipher.AEAD
@@ -349,10 +360,16 @@ func (c *Codec) DecodeRecord(data []byte) (*DecodeRecordResult, error) {
 // RecordWriter serializes ChimneyRecord writes with a mutex.
 // Each call to WriteRecord encodes and writes atomically to prevent
 // interleaving of encrypted records on the underlying stream.
+//
+// Once a write error occurs the writer is marked broken and all subsequent
+// WriteRecord calls return that error without touching the AEAD counter,
+// preventing the "bad record MAC" cascade caused by a counter advance that
+// was never delivered to the peer.
 type RecordWriter struct {
 	mu     sync.Mutex
 	codec  *Codec
 	writer io.Writer
+	broken error // set on first write failure, prevents further writes
 }
 
 // NewRecordWriter creates a RecordWriter.
@@ -364,14 +381,28 @@ func NewRecordWriter(w io.Writer, codec *Codec) *RecordWriter {
 }
 
 // WriteRecord writes a single plaintext chunk as a complete ChimneyRecord.
-// Thread-safe.
+// Thread-safe. After the first write error the writer is permanently broken
+// and all future calls return that error — this guards against AEAD counter
+// desynchronisation when the underlying transport fails.
 func (rw *RecordWriter) WriteRecord(plaintext []byte) error {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
+
+	if rw.broken != nil {
+		return rw.broken
+	}
+
 	record := rw.codec.EncodeRecord(plaintext)
 	for len(record) > 0 {
 		n, err := rw.writer.Write(record)
 		if err != nil {
+			// Only roll back the AEAD counter when zero bytes were written.
+			// If we sent even one byte the receiver's buffer is tainted and
+			// the tunnel must be torn down regardless.
+			if n == 0 {
+				rw.codec.sealer.rollbackSeq()
+			}
+			rw.broken = err
 			return err
 		}
 		record = record[n:]

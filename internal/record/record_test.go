@@ -249,6 +249,62 @@ func TestRecordWriter_RecordReader(t *testing.T) {
 	}
 }
 
+func TestRecordWriter_WriteErrorRollsBackSeq(t *testing.T) {
+	key := generateTestKey(t)
+	nonce := generateTestNonce(t)
+	codec, _ := NewCodec(key, nonce)
+
+	pr, pw := io.Pipe()
+	recWriter := NewRecordWriter(pw, codec)
+
+	// Write one record successfully and drain it so the pipe doesn't block.
+	done := make(chan struct{})
+	go func() {
+		recReader := NewRecordReader(pr, codec)
+		_, err := recReader.ReadRecord()
+		if err != nil {
+			t.Logf("ReadRecord error (expected): %v", err)
+		}
+		close(done)
+	}()
+
+	if err := recWriter.WriteRecord([]byte("record-0")); err != nil {
+		t.Fatalf("WriteRecord failed: %v", err)
+	}
+	<-done
+
+	seqAfter := codec.sealer.Sequence()
+	if seqAfter != 1 {
+		t.Fatalf("expected seq=1 after one write, got %d", seqAfter)
+	}
+
+	// Close the pipe to simulate transport failure.
+	pw.Close()
+
+	// This write will fail because the pipe is closed.
+	err := recWriter.WriteRecord([]byte("record-1"))
+	if err == nil {
+		t.Fatal("expected error after pipe close, got nil")
+	}
+	t.Logf("WriteRecord error: %v", err)
+
+	// Counter must be rolled back — no bytes were written.
+	seqAfterFail := codec.sealer.Sequence()
+	if seqAfterFail != 1 {
+		t.Errorf("expected seq=1 after failed write (rolled back), got %d", seqAfterFail)
+	}
+
+	// Subsequent writes must return the broken error without touching the counter.
+	err2 := recWriter.WriteRecord([]byte("record-2"))
+	if err2 == nil {
+		t.Fatal("expected broken-writer error on second attempt")
+	}
+	seqAfterBroken := codec.sealer.Sequence()
+	if seqAfterBroken != 1 {
+		t.Errorf("expected seq=1 after broken-writer rejection, got %d", seqAfterBroken)
+	}
+}
+
 func TestKeyLen(t *testing.T) {
 	tests := []struct {
 		aead   string
