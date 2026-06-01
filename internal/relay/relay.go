@@ -1007,15 +1007,13 @@ func (p *tunnelConnPool) removePending(streamID uint32) {
 	delete(p.pending, streamID)
 }
 
-func (p *tunnelConnPool) flushPending(streamID uint32, conn net.Conn, logger *slog.Logger) {
+func (p *tunnelConnPool) flushPending(streamID uint32, writeCh chan<- []byte) {
 	p.mu.Lock()
 	bufs := p.pending[streamID]
 	delete(p.pending, streamID)
 	p.mu.Unlock()
 	for _, data := range bufs {
-		if _, err := conn.Write(data); err != nil {
-			logger.Debug("flush pending write failed", "error", err)
-		}
+		writeCh <- data
 	}
 }
 
@@ -1346,7 +1344,7 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 					}
 					writeCh := pool.registerWriteCh(sid)
 					go s.writeBackend(sid, backendConn, writeCh, logger, pool)
-					pool.flushPending(sid, backendConn, logger)
+					pool.flushPending(sid, writeCh)
 					s.readBackend(sid, backendConn, h2Eng, logger)
 				}(fh.StreamID, dest)
 			}
