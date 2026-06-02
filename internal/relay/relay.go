@@ -556,7 +556,7 @@ func (s *Server) relayHandshake(clientConn, siteConn net.Conn, logger *slog.Logg
 
 							// Drain remaining data after the first 0x17
 							origFaLen := len(fa)
-							clientConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+							clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 							for {
 								n2, rdErr := clientConn.Read(buf)
 								if n2 > 0 {
@@ -1147,21 +1147,29 @@ func (s *Server) startUDPBackend(streamID uint32, h2Eng *h2engine.Engine, logger
 // Wire format: [0x04 cmd][1B addrType][addr][2B port][payload]
 func (ub *udpBackend) readLoop() {
 	buf := make([]byte, 65536)
+	const readTimeout = 30 * time.Second
+	const idleKillTimeout = 5 * time.Minute
+	lastPacket := time.Now()
 	for {
 		select {
 		case <-ub.quit:
 			return
 		default:
 		}
-		ub.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		ub.conn.SetReadDeadline(time.Now().Add(readTimeout))
 		n, remoteAddr, err := ub.conn.ReadFromUDP(buf)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				if time.Since(lastPacket) >= idleKillTimeout {
+					ub.logger.Debug("udp backend idle timeout, closing", "stream_id", ub.streamID)
+					return
+				}
 				continue
 			}
 			ub.logger.Debug("udp backend read error", "stream_id", ub.streamID, "error", err)
 			return
 		}
+		lastPacket = time.Now()
 		frame := encodeUDPResponse(remoteAddr, buf[:n])
 		if frame == nil {
 			continue

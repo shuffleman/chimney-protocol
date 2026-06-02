@@ -72,6 +72,10 @@ var (
 	// ErrBadRecordMAC is returned when AEAD decryption (Open) fails.
 	ErrBadRecordMAC = errors.New("record: bad record MAC")
 
+	// ErrTooManyFailures is returned when consecutive AEAD failures exceed
+	// maxConsecutiveAEADFailures, indicating a likely key mismatch or attack.
+	ErrTooManyFailures = errors.New("record: too many consecutive AEAD failures")
+
 	// ErrInvalidRecordType is returned when the record type is not application_data.
 	ErrInvalidRecordType = errors.New("record: invalid record type")
 
@@ -201,6 +205,12 @@ func (s *Sealer) rollbackSeq() {
 	}
 }
 
+// maxConsecutiveAEADFailures is the number of back-to-back AEAD failures that
+// cause Open to return ErrTooManyFailures instead of ErrBadRecordMAC. A single
+// corrupt record on an otherwise-valid tunnel should not kill the connection,
+// but a sustained run almost certainly indicates a key mismatch or active attack.
+const maxConsecutiveAEADFailures = 3
+
 // Opener handles AEAD opening (decryption) of record payloads.
 type Opener struct {
 	aead     cipher.AEAD
@@ -246,6 +256,10 @@ func (o *Opener) Open(dst, ciphertext, additionalData []byte) ([]byte, error) {
 		o.failures++
 		if DebugTracer != nil {
 			DebugTracer("open-ERR", o.seq, nonce, additionalData, nil, ciphertext, o.keyFP)
+		}
+		if o.failures >= maxConsecutiveAEADFailures {
+			return nil, fmt.Errorf("%w: seq=%d failures=%d (key mismatch or active attack)",
+				ErrTooManyFailures, o.seq, o.failures)
 		}
 		return nil, fmt.Errorf("%w: expected seq=%d consecutive_failures=%d",
 			ErrBadRecordMAC, o.seq, o.failures)

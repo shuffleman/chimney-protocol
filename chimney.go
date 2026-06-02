@@ -860,6 +860,39 @@ func NewDialer(config Config) (*Dialer, error) {
 	}, nil
 }
 
+// ensureTunnel returns the tunnel at pool[idx], replacing it with a fresh one
+// if the existing tunnel's dispatch goroutine has already exited. Only one
+// goroutine replaces a given slot at a time; concurrent callers block on d.mu
+// and then reuse the tunnel that was just created.
+func (d *Dialer) ensureTunnel(idx uint32) *tunnel {
+	t := d.pool[idx]
+	select {
+	case <-t.dead:
+		// Tunnel is dead — attempt to replace it.
+	default:
+		return t // still alive
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Re-check under lock: another goroutine may have already replaced it.
+	select {
+	case <-d.pool[idx].dead:
+	default:
+		return d.pool[idx]
+	}
+
+	newT, err := newTunnel(d.config, d.prof, d.dilution)
+	if err != nil {
+		// Reconnect failed; return the dead tunnel so dialContext returns an error.
+		return d.pool[idx]
+	}
+	d.pool[idx].closeTunnel()
+	d.pool[idx] = newT
+	return newT
+}
+
 // DialContext opens a new H2 stream through the Chimney tunnel to addr.
 // The returned net.Conn is a virtual connection multiplexed over H2.
 // Streams are distributed across the connection pool round-robin.
@@ -873,9 +906,9 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	}
 	d.mu.Unlock()
 
-	// Round-robin across the connection pool.
+	// Round-robin across the connection pool, auto-reconnecting dead tunnels.
 	idx := d.next.Add(1) % uint32(len(d.pool))
-	t := d.pool[idx]
+	t := d.ensureTunnel(idx)
 
 	return t.dialContext(ctx, addr)
 }
