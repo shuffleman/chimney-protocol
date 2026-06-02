@@ -16,12 +16,22 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"sync"
 )
+
+// DebugTracer is a package-level hook for capturing every seal/open operation.
+// When set, it is called on every Seal and Open with the full plaintext/ciphertext.
+var DebugTracer func(dir string, seq uint64, nonce, hdr, plaintext, ciphertext []byte, keyFP [4]byte)
+
+// RecordTraceHook is a package-level hook for capturing full record bytes
+// from both encode and decode sides for diagnostic comparison.
+// dir is "encode" or "decode", keyFP distinguishes client->relay from relay->client.
+var RecordTraceHook func(dir string, seq uint64, recordData []byte, keyFP [4]byte)
 
 const (
 	// Record header sizes.
@@ -48,14 +58,6 @@ const (
 	// when the reader stalls or an attacker sends partial records.
 	MaxBufSize = MaxRecordLen * 4
 )
-
-// readBufPool reuses the tmp read buffer in RecordReader.ReadRecord.
-var readBufPool = sync.Pool{
-	New: func() any {
-		buf := make([]byte, MaxRecordLen)
-		return &buf
-	},
-}
 
 var (
 	// ErrRecordTooShort is returned when a record is shorter than the header.
@@ -125,6 +127,7 @@ type Sealer struct {
 	aead  cipher.AEAD
 	nonce NonceStrategy
 	seq   uint64
+	keyFP [4]byte
 	mu    sync.Mutex
 }
 
@@ -154,7 +157,10 @@ func NewSealerAESGCM(key, nonceBase []byte) (*Sealer, error) {
 		return nil, fmt.Errorf("record: failed to create GCM: %w", err)
 	}
 	nonce := NewCounterNonceWithBase(nonceBase)
-	return &Sealer{aead: aead, nonce: nonce}, nil
+	keyHash := sha256.Sum256(key)
+	var keyFP [4]byte
+	copy(keyFP[:], keyHash[:4])
+	return &Sealer{aead: aead, nonce: nonce, keyFP: keyFP}, nil
 }
 
 // Seal encrypts plaintext into dst, returning the ciphertext (record payload).
@@ -165,9 +171,16 @@ func (s *Sealer) Seal(dst, plaintext, additionalData []byte) []byte {
 	defer s.mu.Unlock()
 
 	nonce := s.nonce.Nonce(s.seq)
+	seq := s.seq
 	s.seq++
 
-	return s.aead.Seal(dst, nonce, plaintext, additionalData)
+	result := s.aead.Seal(dst, nonce, plaintext, additionalData)
+
+	if DebugTracer != nil {
+		DebugTracer("seal", seq, nonce, additionalData, plaintext, result, s.keyFP)
+	}
+
+	return result
 }
 
 // Sequence returns the current sequence number.
@@ -194,6 +207,7 @@ type Opener struct {
 	nonce    NonceStrategy
 	seq      uint64
 	failures uint64 // consecutive AEAD failures (reset on success)
+	keyFP    [4]byte
 	mu       sync.Mutex
 }
 
@@ -208,7 +222,10 @@ func NewOpenerAESGCM(key, nonceBase []byte) (*Opener, error) {
 		return nil, fmt.Errorf("record: failed to create GCM: %w", err)
 	}
 	nonce := NewCounterNonceWithBase(nonceBase)
-	return &Opener{aead: aead, nonce: nonce}, nil
+	keyHash := sha256.Sum256(key)
+	var keyFP [4]byte
+	copy(keyFP[:], keyHash[:4])
+	return &Opener{aead: aead, nonce: nonce, keyFP: keyFP}, nil
 }
 
 // Open decrypts ciphertext into dst, returning the plaintext.
@@ -227,12 +244,21 @@ func (o *Opener) Open(dst, ciphertext, additionalData []byte) ([]byte, error) {
 	plaintext, err := o.aead.Open(dst, nonce, ciphertext, additionalData)
 	if err != nil {
 		o.failures++
+		if DebugTracer != nil {
+			DebugTracer("open-ERR", o.seq, nonce, additionalData, nil, ciphertext, o.keyFP)
+		}
 		return nil, fmt.Errorf("%w: expected seq=%d consecutive_failures=%d",
 			ErrBadRecordMAC, o.seq, o.failures)
 	}
 
+	seq := o.seq
 	o.seq++
 	o.failures = 0
+
+	if DebugTracer != nil {
+		DebugTracer("open", seq, nonce, additionalData, plaintext, ciphertext, o.keyFP)
+	}
+
 	return plaintext, nil
 }
 
@@ -261,6 +287,12 @@ func (c *Codec) SealerSeq() uint64 { return c.sealer.Sequence() }
 
 // OpenerSeq returns the current opener sequence number.
 func (c *Codec) OpenerSeq() uint64 { return c.opener.Sequence() }
+
+// SealerTrail returns a diagnostic trail of recent sealer operations.
+func (c *Codec) SealerTrail() string { return "(trail not enabled)" }
+
+// OpenerTrail returns a diagnostic trail of recent opener operations.
+func (c *Codec) OpenerTrail() string { return "(trail not enabled)" }
 
 // NewCodec creates a Codec with AES-GCM for both directions.
 // In practice, K_sess provides one key for client→relay and one for relay→client.
@@ -313,6 +345,10 @@ func (c *Codec) EncodeRecord(plaintext []byte) []byte {
 	record := make([]byte, RecordHeaderLen+len(ciphertext))
 	copy(record, header)
 	copy(record[RecordHeaderLen:], ciphertext)
+
+	if RecordTraceHook != nil {
+		RecordTraceHook("encode", c.sealer.Sequence()-1, record, c.sealer.keyFP)
+	}
 
 	return record
 }
@@ -368,6 +404,11 @@ func (c *Codec) DecodeRecord(data []byte) (*DecodeRecordResult, error) {
 	header := data[:RecordHeaderLen]
 	ciphertext := data[RecordHeaderLen : RecordHeaderLen+length]
 
+	if RecordTraceHook != nil {
+		rec := data[:RecordHeaderLen+int(length)]
+		RecordTraceHook("decode", c.opener.Sequence(), rec, c.opener.keyFP)
+	}
+
 	plaintext, err := c.opener.Open(nil, ciphertext, header)
 	if err != nil {
 		return nil, err
@@ -415,6 +456,8 @@ func (rw *RecordWriter) WriteRecord(plaintext []byte) error {
 	}
 
 	record := rw.codec.EncodeRecord(plaintext)
+	writeDelay()
+
 	for len(record) > 0 {
 		n, err := rw.writer.Write(record)
 		if err != nil {
@@ -479,23 +522,33 @@ func (rr *RecordReader) ReadRecord() ([]byte, error) {
 		}
 
 		// Need more data
-			if len(rr.buf) >= MaxBufSize {
-				return nil, ErrBufferOverflow
+		if len(rr.buf) >= MaxBufSize {
+			return nil, ErrBufferOverflow
+		}
+
+		// Ensure spare capacity for a full record without a separate allocation.
+		// Compact (reallocate from scratch) only when spare capacity is too small.
+		if cap(rr.buf)-len(rr.buf) < MaxRecordLen {
+			newCap := len(rr.buf) + MaxRecordLen*2
+			if newCap > MaxBufSize {
+				newCap = MaxBufSize
 			}
-			tmpPtr := readBufPool.Get().(*[]byte)
-			tmp := *tmpPtr
-			n, err := rr.reader.Read(tmp)
-			if n > 0 {
-				rr.buf = append(rr.buf, tmp[:n]...)
-			}
-			readBufPool.Put(tmpPtr)
+			newBuf := make([]byte, len(rr.buf), newCap)
+			copy(newBuf, rr.buf)
+			rr.buf = newBuf
+		}
+
+		// Read directly into spare buffer space — no separate tmp allocation.
+		prevLen := len(rr.buf)
+		rr.buf = rr.buf[:cap(rr.buf)]
+		n, err := rr.reader.Read(rr.buf[prevLen:])
+		rr.buf = rr.buf[:prevLen+n]
+
 		if err != nil {
 			if err == io.EOF && len(rr.buf) > 0 {
-				// Have partial data but hit EOF
 				if len(rr.buf) < RecordHeaderLen {
 					return nil, io.ErrUnexpectedEOF
 				}
-				// Try one last decode
 				result, decodeErr := rr.codec.DecodeRecord(rr.buf)
 				if decodeErr != nil {
 					return nil, io.ErrUnexpectedEOF

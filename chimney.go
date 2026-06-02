@@ -137,6 +137,16 @@ func (t *tunnel) LastError() error {
 	return t.lastError
 }
 
+// CodecTrails returns the sealer and opener trails from the H2 engine's record codec.
+func (t *tunnel) CodecTrails() (sealerTrail, openerTrail string) {
+	return t.h2Eng.CodecTrails()
+}
+
+// CodecSeqs returns the current sealer and opener sequence numbers.
+func (t *tunnel) CodecSeqs() (sealerSeq, openerSeq uint64) {
+	return t.h2Eng.CodecSeqs()
+}
+
 // A Dialer maintains a pool of H2 connections to a Chimney relay.
 // Multiple goroutines may invoke DialContext concurrently; calls are
 // distributed across the pool connections round-robin.
@@ -149,6 +159,23 @@ type Dialer struct {
 
 	prof     *profile.Model
 	dilution *dilution.Provider
+}
+
+// Diagnostics returns diagnostic information from all tunnels in the pool.
+func (d *Dialer) Diagnostics() string {
+	var b strings.Builder
+	for i, t := range d.pool {
+		sealerSeq, openerSeq := t.CodecSeqs()
+		sealerTrail, openerTrail := t.CodecTrails()
+		fmt.Fprintf(&b, "=== Tunnel %d ===\n", i)
+		fmt.Fprintf(&b, "sealer_seq=%d opener_seq=%d\n", sealerSeq, openerSeq)
+		fmt.Fprintf(&b, "sealer trail:\n%s\n", sealerTrail)
+		fmt.Fprintf(&b, "opener trail:\n%s\n", openerTrail)
+		if le := t.LastError(); le != nil {
+			fmt.Fprintf(&b, "lastError: %v\n", le)
+		}
+	}
+	return b.String()
 }
 
 // streamFrame is a frame received for a specific H2 stream.
@@ -688,20 +715,10 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 		}
 	}
 
-	// Step 4: Drain stale TCP bytes.
-	// Use a very short deadline — on clean connections (e.g. loopback)
-	// this returns immediately; on real networks buffered data drains
-	// within the first few reads without blocking tunnel setup.
+	// Step 4: Extract raw TCP connection for the record layer.
+	// After the swap the Chimney record codec operates directly on the
+	// TCP stream — TLS is no longer in the picture.
 	rawTCPConn := uConn.GetUnderlyingConn()
-	rawTCPConn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
-	drainBuf := make([]byte, 8192)
-	for {
-		_, err := rawTCPConn.Read(drainBuf)
-		if err != nil {
-			break
-		}
-	}
-	rawTCPConn.SetReadDeadline(time.Time{})
 
 	// Step 5: Record layer
 	recReader := record.NewRecordReader(rawTCPConn, codec)
@@ -968,8 +985,9 @@ func (t *tunnel) dispatchFrames() {
 		fh, payload, err := t.h2Eng.ReadFrame()
 		if err != nil {
 			sealerSeq, openerSeq := t.h2Eng.CodecSeqs()
-			t.lastError = fmt.Errorf("frame read: %w [sealer_seq=%d opener_seq=%d]",
-				err, sealerSeq, openerSeq)
+			sealerTrail, openerTrail := t.h2Eng.CodecTrails()
+			t.lastError = fmt.Errorf("frame read: %w [sealer_seq=%d opener_seq=%d]\nsealer trail (last 32):\n%s\nopener trail (last 32):\n%s",
+				err, sealerSeq, openerSeq, sealerTrail, openerTrail)
 			t.mu.Lock()
 			for _, ch := range t.streams {
 				close(ch)

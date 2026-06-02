@@ -18,6 +18,7 @@ package relay
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -544,11 +545,17 @@ func (s *Server) relayHandshake(clientConn, siteConn net.Conn, logger *slog.Logg
 							// the ChimneyRecord. Drain everything that follows.
 							fa = make([]byte, len(recordBuf))
 							copy(fa, recordBuf)
+							faHash := sha256.Sum256(fa)
+							logger.Debug("relayHandshake captured first 0x17",
+								"recordBuf_sha256", hex.EncodeToString(faHash[:]),
+								"recordBuf_len", len(fa),
+							)
 							recordBuf = recordBuf[:0]
 							close(quit)
 							siteConn.SetReadDeadline(time.Now())
 
 							// Drain remaining data after the first 0x17
+							origFaLen := len(fa)
 							clientConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 							for {
 								n2, rdErr := clientConn.Read(buf)
@@ -560,6 +567,12 @@ func (s *Server) relayHandshake(clientConn, siteConn net.Conn, logger *slog.Logg
 								}
 							}
 							clientConn.SetReadDeadline(time.Time{})
+							faHash2 := sha256.Sum256(fa)
+							logger.Debug("relayHandshake drain complete",
+								"fa_sha256", hex.EncodeToString(faHash2[:]),
+								"fa_len", len(fa),
+								"drained", len(fa)-origFaLen,
+							)
 							return
 						}
 
@@ -784,8 +797,26 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 		}
 	}
 
-	// Wrap clientConn with only the ChimneyRecord as prefix.
-	wrappedReader := &prependConn{Conn: clientConn, prefix: chimneyRecord}
+	// Wrap clientConn, replaying everything from the first chimney record
+	// onwards. findChimneyRecord may have consumed more TLS records after
+	// the chimney record when the client sent them back-to-back (e.g. H2
+	// preface + SETTINGS ACK + auth DATA). Dropping those bytes would
+	// cause a permanent AEAD counter desync.
+	tunnelPrefix := firstAppData[len(preludeRecords):]
+	if len(tunnelPrefix) > len(chimneyRecord) {
+		logger.Debug("swap buffer includes trailing records",
+			"chimney_record", len(chimneyRecord),
+			"extra_bytes", len(tunnelPrefix)-len(chimneyRecord))
+	}
+	tpHash := sha256.Sum256(tunnelPrefix)
+	logger.Debug("tunnelPrefix hash",
+		"sni", sni,
+		"tunnelPrefix_sha256", hex.EncodeToString(tpHash[:]),
+		"tunnelPrefix_len", len(tunnelPrefix),
+		"prelude_len", len(preludeRecords),
+		"firstAppData_len", len(firstAppData),
+	)
+	wrappedReader := &prependConn{Conn: clientConn, prefix: tunnelPrefix}
 	recReader := record.NewRecordReader(wrappedReader, codec)
 	recWriter := record.NewRecordWriter(wrappedReader, codec)
 	defer recWriter.Close()
@@ -1030,8 +1061,8 @@ func (p *tunnelConnPool) registerWriteCh(streamID uint32) chan []byte {
 // writeToStream sends data to the stream's write goroutine via its channel.
 // Blocks until the write goroutine accepts the data, providing natural
 // backpressure that is per-stream rather than blocking the entire tunnel.
-// Returns false if the stream is not registered (stream already closed).
-func (p *tunnelConnPool) writeToStream(streamID uint32, data []byte) bool {
+// Returns false if the stream is not registered or has been closed concurrently.
+func (p *tunnelConnPool) writeToStream(streamID uint32, data []byte) (sent bool) {
 	p.mu.Lock()
 	ch, ok := p.writeChs[streamID]
 	p.mu.Unlock()
@@ -1040,6 +1071,12 @@ func (p *tunnelConnPool) writeToStream(streamID uint32, data []byte) bool {
 	}
 	d := make([]byte, len(data))
 	copy(d, data)
+	// closeStream may close ch between the map read and this send; recover the panic.
+	defer func() {
+		if r := recover(); r != nil {
+			sent = false
+		}
+	}()
 	ch <- d
 	return true
 }

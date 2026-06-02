@@ -356,6 +356,59 @@ func BenchmarkEncodeRecord(b *testing.B) {
 	}
 }
 
+// TestRecordWriter_PipeStress sends many full-size records through io.Pipe
+// to isolate whether record corruption is a codec issue or TCP-specific.
+// The record size matches the H2 max frame: 16384 payload + 9 H2 header = 16393 bytes plaintext.
+func TestRecordWriter_PipeStress(t *testing.T) {
+	const numRecords = 100
+	const plaintextSize = 16384 + 9 // full H2 DATA frame
+
+	key := generateTestKey(t)
+	nonce := generateTestNonce(t)
+	codec, _ := NewCodec(key, nonce)
+	// Fresh codec for reader — same key material
+	codec2, _ := NewCodec(key, nonce)
+
+	pr, pw := io.Pipe()
+	recWriter := NewRecordWriter(pw, codec)
+	recReader := NewRecordReader(pr, codec2)
+
+	// Prepare plaintexts
+	plaintexts := make([][]byte, numRecords)
+	for i := range plaintexts {
+		p := make([]byte, plaintextSize)
+		rand.Reader.Read(p)
+		plaintexts[i] = p
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		defer pw.Close()
+		for i, pt := range plaintexts {
+			if err := recWriter.WriteRecord(pt); err != nil {
+				errCh <- fmt.Errorf("WriteRecord seq=%d: %w", i, err)
+				return
+			}
+		}
+	}()
+
+	for i := 0; i < numRecords; i++ {
+		decoded, err := recReader.ReadRecord()
+		if err != nil {
+			t.Fatalf("ReadRecord seq=%d: %v", i, err)
+		}
+		if !bytes.Equal(decoded, plaintexts[i]) {
+			t.Fatalf("MISMATCH seq=%d: len(want)=%d len(got)=%d", i, len(plaintexts[i]), len(decoded))
+		}
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	default:
+	}
+}
+
 func BenchmarkDecodeRecord(b *testing.B) {
 	key := generateTestKey(&testing.T{})
 	nonce := generateTestNonce(&testing.T{})

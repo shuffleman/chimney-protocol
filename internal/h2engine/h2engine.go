@@ -140,7 +140,7 @@ func DefaultSettings() *Settings {
 	enablePush := uint32(0) // Most servers disable push
 	maxConcurrentStreams := uint32(100)
 	initialWindowSize := uint32(65535) // Default per RFC 7540
-	maxFrameSize := uint32(16384)
+	maxFrameSize := uint32(16384) // Match Chrome/Firefox default (RFC 7540 default)
 	maxHeaderListSize := uint32(uint32(1<<31) - 1)
 
 	return &Settings{
@@ -383,6 +383,14 @@ func (e *Engine) CodecSeqs() (sealerSeq, openerSeq uint64) {
 		return 0, 0
 	}
 	return e.recordCodec.SealerSeq(), e.recordCodec.OpenerSeq()
+}
+
+// CodecTrails returns the sealer and opener operation trails for diagnostics.
+func (e *Engine) CodecTrails() (sealerTrail, openerTrail string) {
+	if e.recordCodec == nil {
+		return "(no codec)", "(no codec)"
+	}
+	return e.recordCodec.SealerTrail(), e.recordCodec.OpenerTrail()
 }
 
 // InitiateAsClient performs the client-side H2 opening sequence:
