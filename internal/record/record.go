@@ -447,6 +447,10 @@ func NewRecordWriter(w io.Writer, codec *Codec) *RecordWriter {
 // Thread-safe. After the first write error the writer is permanently broken
 // and all future calls return that error — this guards against AEAD counter
 // desynchronisation when the underlying transport fails.
+//
+// On Windows, each Write call is capped at maxWriteChunk bytes (8192) to
+// work around a loopback TCP driver bug where writes spanning more than
+// 2 memory pages (> 8192 bytes) deliver corrupted bytes from page 2 onward.
 func (rw *RecordWriter) WriteRecord(plaintext []byte) error {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
@@ -456,15 +460,23 @@ func (rw *RecordWriter) WriteRecord(plaintext []byte) error {
 	}
 
 	record := rw.codec.EncodeRecord(plaintext)
-	writeDelay()
 
+	anyWritten := false
 	for len(record) > 0 {
-		n, err := rw.writer.Write(record)
+		writeDelay()
+		chunk := record
+		if maxWriteChunk > 0 && len(chunk) > maxWriteChunk {
+			chunk = record[:maxWriteChunk]
+		}
+		n, err := rw.writer.Write(chunk)
+		if n > 0 {
+			anyWritten = true
+		}
 		if err != nil {
-			// Only roll back the AEAD counter when zero bytes were written.
-			// If we sent even one byte the receiver's buffer is tainted and
-			// the tunnel must be torn down regardless.
-			if n == 0 {
+			// Only roll back the AEAD counter when zero bytes were written
+			// in total. If even one byte reached the receiver the tunnel must
+			// be torn down — the partial record can't be undone.
+			if !anyWritten {
 				rw.codec.sealer.rollbackSeq()
 			}
 			rw.broken = err

@@ -340,7 +340,7 @@ func main() {
 		Fingerprint:      "chrome",
 		ConnectTimeout:   10 * time.Second,
 		HandshakeTimeout: 10 * time.Second,
-		PoolSize:         1, // Single tunnel to simplify diagnostics
+		PoolSize:         4, // Match speedtest pool_size
 	}
 
 	dialer, err := chimney.NewDialer(clientCfg)
@@ -350,9 +350,9 @@ func main() {
 	defer dialer.Close()
 	log.Println("Client dialer created")
 
-	// Run 4 concurrent uploads of 20MB each.
-	const numUploads = 1
-	const uploadSize = 5 * 1024 * 1024
+	// Run concurrent uploads to reproduce the 8-stream issue.
+	const numUploads = 8
+	const uploadSize = 20 * 1024 * 1024
 	const targetAddr = "127.0.0.1:19999"
 
 	var wg sync.WaitGroup

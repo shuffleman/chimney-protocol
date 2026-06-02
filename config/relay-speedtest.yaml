@@ -1,0 +1,11 @@
+listen_addr: ":8444"
+psk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+tag_len: 16
+intent_file: "config/intent.yaml"
+enforce_file: "config/enforce.yaml"
+cloud_region: "us-east-1"
+default_backend: ""
+handshake_timeout: 10s
+auth_read_timeout: 5s
+enable_profiling: false
+log_level: "debug"
