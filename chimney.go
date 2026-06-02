@@ -106,9 +106,8 @@ type Config struct {
 	PoolSize int
 
 	// TCPBufferSize sets the TCP read/write buffer size in bytes for each tunnel
-	// connection (default: 2 MiB). On memory-constrained platforms like iOS,
-	// reduce to 262144 (256 KiB) to save memory at the cost of throughput under
-	// high stream concurrency.
+	// connection (default: 262144 = 256 KiB). On memory-constrained platforms
+	// like iOS, reduce to 65536 to save ~384 KiB per tunnel.
 	TCPBufferSize int
 }
 
@@ -632,9 +631,7 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 
 	tcpBufSize := config.TCPBufferSize
 	if tcpBufSize <= 0 {
-		// 2 MiB accommodates ~32 concurrent 65 KiB H2 streams per tunnel
-		// without filling the receive buffer and stalling writes.
-		tcpBufSize = 2 * 1024 * 1024
+		tcpBufSize = 256 * 1024
 	}
 	if tcpConn, ok := rawConn.(*net.TCPConn); ok {
 		tcpConn.SetReadBuffer(tcpBufSize)
