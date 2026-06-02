@@ -106,8 +106,9 @@ type Config struct {
 	PoolSize int
 
 	// TCPBufferSize sets the TCP read/write buffer size in bytes for each tunnel
-	// connection (default: 262144 = 256 KiB). On memory-constrained platforms
-	// like iOS, reduce to 65536 to save ~384 KiB per tunnel.
+	// connection (default: 2 MiB). On memory-constrained platforms like iOS,
+	// reduce to 262144 (256 KiB) to save memory at the cost of throughput under
+	// high stream concurrency.
 	TCPBufferSize int
 }
 
@@ -631,7 +632,9 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 
 	tcpBufSize := config.TCPBufferSize
 	if tcpBufSize <= 0 {
-		tcpBufSize = 256 * 1024
+		// 2 MiB accommodates ~32 concurrent 65 KiB H2 streams per tunnel
+		// without filling the receive buffer and stalling writes.
+		tcpBufSize = 2 * 1024 * 1024
 	}
 	if tcpConn, ok := rawConn.(*net.TCPConn); ok {
 		tcpConn.SetReadBuffer(tcpBufSize)
@@ -968,8 +971,19 @@ func (t *tunnel) closeTunnel() error {
 }
 
 // dispatchFrames reads frames from the H2 engine and routes them to per-stream channels.
+// tunnelIdleTimeout is the maximum duration with no frames received before
+// the tunnel is considered dead and torn down. This prevents dispatchFrames
+// from blocking forever on a stuck Windows TCP loopback connection.
+const tunnelIdleTimeout = 30 * time.Second
+
 func (t *tunnel) dispatchFrames() {
 	defer close(t.dead)
+
+	// Rolling read deadline: extended after every successful ReadFrame so
+	// active tunnels never time out; stuck connections are detected within
+	// tunnelIdleTimeout seconds.
+	t.rawConn.SetReadDeadline(time.Now().Add(tunnelIdleTimeout))
+
 	for {
 		select {
 		case <-t.quit:
@@ -996,13 +1010,33 @@ func (t *tunnel) dispatchFrames() {
 			t.mu.Unlock()
 			return
 		}
+		// Extend deadline on every successful frame receipt.
+		t.rawConn.SetReadDeadline(time.Now().Add(tunnelIdleTimeout))
+
 		t.mu.Lock()
 		ch, ok := t.streams[fh.StreamID]
 		t.mu.Unlock()
 		if ok {
+			// Fast path: channel has space — no timer allocation.
 			select {
 			case ch <- &streamFrame{fh, payload}:
-			case <-t.quit:
+			default:
+				// Slow path: channel is full. Wait with a timeout — a consumer
+				// stuck for tunnelIdleTimeout starves the TCP receive buffer and
+				// deadlocks the tunnel, so tear it down if necessary.
+				select {
+				case ch <- &streamFrame{fh, payload}:
+				case <-t.quit:
+				case <-time.After(tunnelIdleTimeout):
+					t.rawConn.Close()
+					t.mu.Lock()
+					for _, c := range t.streams {
+						close(c)
+					}
+					t.streams = make(map[uint32]chan *streamFrame)
+					t.mu.Unlock()
+					return
+				}
 			}
 		}
 	}
