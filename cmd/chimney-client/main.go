@@ -156,21 +156,14 @@ type Client struct {
 
 // Run starts the client.
 func (c *Client) Run() error {
-	// Establish tunnel to relay
-	tunnel, err := c.establishTunnel()
+	manager, err := c.newTunnelManager()
 	if err != nil {
-		return fmt.Errorf("establish tunnel: %w", err)
+		return err
 	}
-	defer tunnel.Close()
+	defer manager.Close()
 
-	c.Logger.Info("tunnel established",
-		"relay", c.RelayAddr,
-		"sni", c.SNI,
-		"dest", c.DestAddr,
-	)
-
-	// Start local SOCKS5 proxy that forwards through the tunnel
-	return c.runSOCKS5(tunnel)
+	// Start local SOCKS5 proxy that forwards through reconnecting tunnels.
+	return c.runSOCKS5(manager)
 }
 
 // establishTunnel establishes the Chimney tunnel to the relay.
@@ -391,8 +384,74 @@ func (c *Client) completeH2Handshake(h2Eng *h2engine.Engine, recWriter *record.R
 	return nil
 }
 
+type tunnelManager struct {
+	client *Client
+
+	mu     sync.Mutex
+	tunnel *tunnelConn
+}
+
+func (c *Client) newTunnelManager() (*tunnelManager, error) {
+	m := &tunnelManager{client: c}
+	if _, err := m.getTunnel(); err != nil {
+		return nil, fmt.Errorf("establish tunnel: %w", err)
+	}
+	return m, nil
+}
+
+func (m *tunnelManager) getTunnel() (*tunnelConn, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.tunnel != nil && m.tunnel.isAlive() {
+		return m.tunnel, nil
+	}
+
+	if m.tunnel != nil {
+		m.client.Logger.Info("tunnel is down, reconnecting", "error", m.tunnel.LastError())
+		_ = m.tunnel.Close()
+	}
+
+	tunnel, err := m.client.establishTunnel()
+	if err != nil {
+		return nil, err
+	}
+	tc, ok := tunnel.(*tunnelConn)
+	if !ok {
+		_ = tunnel.Close()
+		return nil, fmt.Errorf("unexpected tunnel type %T", tunnel)
+	}
+
+	m.tunnel = tc
+	m.client.Logger.Info("tunnel established",
+		"relay", m.client.RelayAddr,
+		"sni", m.client.SNI,
+		"dest", m.client.DestAddr,
+	)
+	return tc, nil
+}
+
+func (m *tunnelManager) reconnect() (*tunnelConn, error) {
+	m.mu.Lock()
+	if m.tunnel != nil {
+		_ = m.tunnel.Close()
+		m.tunnel = nil
+	}
+	m.mu.Unlock()
+	return m.getTunnel()
+}
+
+func (m *tunnelManager) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.tunnel == nil {
+		return nil
+	}
+	return m.tunnel.Close()
+}
+
 // runSOCKS5 runs a local SOCKS5 proxy that forwards through the tunnel.
-func (c *Client) runSOCKS5(tunnel net.Conn) error {
+func (c *Client) runSOCKS5(manager *tunnelManager) error {
 	listener, err := net.Listen("tcp", c.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("SOCKS5 listen: %w", err)
@@ -408,15 +467,13 @@ func (c *Client) runSOCKS5(tunnel net.Conn) error {
 			continue
 		}
 
-		go c.handleSOCKS5Conn(conn, tunnel)
+		go c.handleSOCKS5Conn(conn, manager)
 	}
 }
 
 // handleSOCKS5Conn handles a single SOCKS5 connection.
-func (c *Client) handleSOCKS5Conn(clientConn net.Conn, tunnel net.Conn) {
+func (c *Client) handleSOCKS5Conn(clientConn net.Conn, manager *tunnelManager) {
 	defer clientConn.Close()
-
-	tc := tunnel.(*tunnelConn)
 
 	// SOCKS5 handshake
 	if err := c.socks5Handshake(clientConn); err != nil {
@@ -434,11 +491,23 @@ func (c *Client) handleSOCKS5Conn(clientConn net.Conn, tunnel net.Conn) {
 	c.Logger.Debug("SOCKS5 connect", "target", targetAddr)
 
 	// Open a tunnel stream to the target via the relay
-	stream, err := tc.openStream(targetAddr)
+	tc, err := manager.getTunnel()
 	if err != nil {
-		c.Logger.Debug("tunnel stream open failed", "error", err)
+		c.Logger.Debug("tunnel unavailable", "error", err)
 		c.socks5SendReply(clientConn, 0x01) // General SOCKS server failure
 		return
+	}
+	stream, err := tc.openStream(targetAddr)
+	if err != nil {
+		c.Logger.Debug("tunnel stream open failed, retrying with fresh tunnel", "error", err)
+		if tc, err = manager.reconnect(); err == nil {
+			stream, err = tc.openStream(targetAddr)
+		}
+		if err != nil {
+			c.Logger.Debug("tunnel stream open retry failed", "error", err)
+			c.socks5SendReply(clientConn, 0x01) // General SOCKS server failure
+			return
+		}
 	}
 	defer stream.Close()
 
@@ -560,6 +629,11 @@ type tunnelConn struct {
 	mu      sync.Mutex
 	streams map[uint32]chan *streamFrame
 	quit    chan struct{}
+	dead    chan struct{}
+	lastErr error
+
+	closeOnce sync.Once
+	deadOnce  sync.Once
 }
 
 // newTunnelConn creates a tunnelConn and starts its frame dispatcher.
@@ -574,12 +648,55 @@ func newTunnelConn(rawConn net.Conn, h2Eng *h2engine.Engine, recReader *record.R
 		dilution:      dilutionProv,
 		streams:       make(map[uint32]chan *streamFrame),
 		quit:          make(chan struct{}),
+		dead:          make(chan struct{}),
 	}
 	go tc.dispatchFrames()
 	if dilutionProv != nil && prof != nil {
 		go tc.dilutionLoop()
 	}
 	return tc
+}
+
+func (tc *tunnelConn) isAlive() bool {
+	select {
+	case <-tc.dead:
+		return false
+	default:
+		return true
+	}
+}
+
+func (tc *tunnelConn) LastError() error {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.lastErr
+}
+
+func (tc *tunnelConn) Close() error {
+	var err error
+	tc.closeOnce.Do(func() {
+		close(tc.quit)
+		tc.recWriter.Close()
+		err = tc.Conn.Close()
+		tc.markDead(err)
+	})
+	return err
+}
+
+func (tc *tunnelConn) markDead(err error) {
+	tc.mu.Lock()
+	if err != nil {
+		tc.lastErr = err
+	}
+	for _, ch := range tc.streams {
+		close(ch)
+	}
+	tc.streams = make(map[uint32]chan *streamFrame)
+	tc.mu.Unlock()
+
+	tc.deadOnce.Do(func() {
+		close(tc.dead)
+	})
 }
 
 // dispatchFrames reads frames from the H2 engine and routes them to per-stream channels.
@@ -592,12 +709,7 @@ func (tc *tunnelConn) dispatchFrames() {
 		}
 		fh, payload, err := tc.h2Engine.ReadFrame()
 		if err != nil {
-			tc.mu.Lock()
-			for _, ch := range tc.streams {
-				close(ch)
-			}
-			tc.streams = make(map[uint32]chan *streamFrame)
-			tc.mu.Unlock()
+			tc.markDead(err)
 			return
 		}
 		tc.mu.Lock()
