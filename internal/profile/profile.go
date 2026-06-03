@@ -24,7 +24,6 @@ import (
 	"math"
 	"math/rand"
 	"os"
-	"sync"
 	"time"
 )
 
@@ -217,8 +216,8 @@ func DefaultModel() *Model {
 			StdDev: 2,
 		},
 		GapDist: &GapDistribution{
-			Min: 5 * time.Millisecond,
-			Max: 200 * time.Millisecond,
+			Min:      5 * time.Millisecond,
+			Max:      200 * time.Millisecond,
 			MeanMs:   30,
 			StdDevMs: 15,
 		},
@@ -226,8 +225,8 @@ func DefaultModel() *Model {
 			UplinkRatio: 0.4,
 		},
 		IntraBurstPacing: &IntraBurstPacing{
-			Min: 100 * time.Microsecond,
-			Max: 5 * time.Millisecond,
+			Min:      100 * time.Microsecond,
+			Max:      5 * time.Millisecond,
 			MeanUs:   500,
 			StdDevUs: 300,
 		},
@@ -485,8 +484,6 @@ type Pacer struct {
 
 	// Callback for when a record should be sent
 	recordCallback func(size uint16, isUplink bool)
-
-	mu sync.Mutex
 }
 
 // NewPacer creates a new pacer with the given model and callback.

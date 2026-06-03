@@ -26,29 +26,28 @@ import (
 
 // tracedOp records one seal/open operation for post-mortem comparison.
 type tracedOp struct {
-	dir       string // "seal" or "open" or "open-ERR"
-	seq       uint64
-	nonce     string // hex
-	hdr       string // hex (5 bytes)
-	plainFP   string // hex (first 4 bytes of plaintext, or empty for errors)
-	plainHash string // hex (SHA256 of full plaintext)
-	ctxtFP    string // hex (first 8 bytes of ciphertext)
-	ctxtHash  string // hex (SHA256 of full ciphertext)
+	dir         string // "seal" or "open" or "open-ERR"
+	seq         uint64
+	nonce       string // hex
+	hdr         string // hex (5 bytes)
+	plainFP     string // hex (first 4 bytes of plaintext, or empty for errors)
+	plainHash   string // hex (SHA256 of full plaintext)
+	ctxtFP      string // hex (first 8 bytes of ciphertext)
+	ctxtHash    string // hex (SHA256 of full ciphertext)
 	ctxtPreview string // hex (first 64 bytes of ciphertext)
-	keyFP     string // hex (4 bytes, first 4 bytes of SHA256(key))
+	keyFP       string // hex (4 bytes, first 4 bytes of SHA256(key))
 }
 
 // traceCollector gathers seal/open ops from both sides in a single process.
 type traceCollector struct {
-	mu          sync.Mutex
-	ops         []tracedOp
-	openErrCnt  int
-	sealCnt     int
-	openCnt     int
-	sealFull    map[uint64][]byte            // seq -> full ciphertext (for byte-level comparison)
-	encodeRecs  map[string][]byte            // "keyFP:seq" -> full record bytes (from EncodeRecord)
-	decodeRecs  map[string][]byte            // "keyFP:seq" -> full record bytes (from DecodeRecord)
-	clientSendFP string                       // hex keyFP for client→relay direction (set on first encode)
+	mu         sync.Mutex
+	ops        []tracedOp
+	openErrCnt int
+	sealCnt    int
+	openCnt    int
+	sealFull   map[uint64][]byte // seq -> full ciphertext (for byte-level comparison)
+	encodeRecs map[string][]byte // "keyFP:seq" -> full record bytes (from EncodeRecord)
+	decodeRecs map[string][]byte // "keyFP:seq" -> full record bytes (from DecodeRecord)
 }
 
 func (tc *traceCollector) recordTrace(dir string, seq uint64, recordData []byte, keyFP [4]byte) {
@@ -309,10 +308,10 @@ func main() {
 
 	// Start the relay.
 	relayCfg := &chimney.RelayConfig{
-		ListenAddr: "127.0.0.1:19443",
-		PSK:        psk,
-		TagLen:     tagLen,
-		IntentYAML: "version: 1\nentries:\n  cloudflare.com:\n    sni: cloudflare.com\n    settings_snapshot:\n      HEADER_TABLE_SIZE: 4096\n      ENABLE_PUSH: 0\n      MAX_CONCURRENT_STREAMS: 100\n      INITIAL_WINDOW_SIZE: 65535\n      MAX_FRAME_SIZE: 16384\n      MAX_HEADER_LIST_SIZE: 16384\n",
+		ListenAddr:  "127.0.0.1:19443",
+		PSK:         psk,
+		TagLen:      tagLen,
+		IntentYAML:  "version: 1\nentries:\n  cloudflare.com:\n    sni: cloudflare.com\n    settings_snapshot:\n      HEADER_TABLE_SIZE: 4096\n      ENABLE_PUSH: 0\n      MAX_CONCURRENT_STREAMS: 100\n      INITIAL_WINDOW_SIZE: 65535\n      MAX_FRAME_SIZE: 16384\n      MAX_HEADER_LIST_SIZE: 16384\n",
 		EnforceYAML: "version: 1\nentries:\n  - cidr: \"0.0.0.0/0\"\n    provider: testing\n",
 	}
 

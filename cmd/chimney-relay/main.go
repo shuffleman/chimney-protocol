@@ -17,6 +17,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -263,10 +264,10 @@ func startAdminAPI(addr, adminToken string, server *relay.Server, logger *slog.L
 func adminAuthorized(r *http.Request, adminToken string) bool {
 	if adminToken != "" {
 		authz := r.Header.Get("Authorization")
-		if strings.HasPrefix(authz, "Bearer ") && strings.TrimSpace(strings.TrimPrefix(authz, "Bearer ")) == adminToken {
+		if strings.HasPrefix(authz, "Bearer ") && tokenEqual(strings.TrimSpace(strings.TrimPrefix(authz, "Bearer ")), adminToken) {
 			return true
 		}
-		return r.Header.Get("X-Admin-Token") == adminToken
+		return tokenEqual(r.Header.Get("X-Admin-Token"), adminToken)
 	}
 
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -275,4 +276,11 @@ func adminAuthorized(r *http.Request, adminToken string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func tokenEqual(got, want string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }

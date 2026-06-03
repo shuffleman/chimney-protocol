@@ -95,46 +95,6 @@ func newClient(proxyURL string) (*http.Client, error) {
 	}, nil
 }
 
-// countingReader 包装 io.Reader，统计已读字节
-type countingReader struct {
-	r     io.Reader
-	count *atomic.Int64
-}
-
-func (cr *countingReader) Read(p []byte) (int, error) {
-	n, err := cr.r.Read(p)
-	if n > 0 {
-		cr.count.Add(int64(n))
-	}
-	return n, err
-}
-
-// infiniteReader 不停复写 buf，直到 ctx 取消
-type infiniteReader struct {
-	buf    []byte
-	ctx    context.Context
-	offset int
-}
-
-func (r *infiniteReader) Read(p []byte) (int, error) {
-	select {
-	case <-r.ctx.Done():
-		return 0, io.EOF
-	default:
-	}
-	n := copy(p, r.buf[r.offset:])
-	if n == 0 {
-		r.offset = 0
-		n = copy(p, r.buf)
-	} else {
-		r.offset += n
-		if r.offset >= len(r.buf) {
-			r.offset = 0
-		}
-	}
-	return n, nil
-}
-
 func downloadWorker(id int, client *http.Client, targetURL string, s *stats, ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	buf := make([]byte, 128*1024)

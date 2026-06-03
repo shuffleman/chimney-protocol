@@ -295,13 +295,11 @@ func extractProfileFromPcap(pcapFile, siteName string, serverPort uint16) (*prof
 
 	// Extract record sizes
 	var sizes []uint16
-	var uplinkSizes, downlinkSizes []uint16
+	var uplinkSizes []uint16
 	for _, rec := range appDataRecords {
 		sizes = append(sizes, rec.Length)
 		if rec.Direction == pcap.DirClientToServer {
 			uplinkSizes = append(uplinkSizes, rec.Length)
-		} else {
-			downlinkSizes = append(downlinkSizes, rec.Length)
 		}
 	}
 
@@ -341,12 +339,12 @@ func extractProfileFromPcap(pcapFile, siteName string, serverPort uint16) (*prof
 	}
 
 	model := &profile.Model{
-		SiteName:      siteName,
-		CalibratedAt:  time.Now(),
-		SizeDist:      fitSizeDist(sizes),
-		BurstDist:     fitBurstDist(burstSizes),
-		GapDist:       fitGapDist(gaps),
-		DirRatio:      &profile.DirectionRatio{UplinkRatio: uplinkRatio},
+		SiteName:     siteName,
+		CalibratedAt: time.Now(),
+		SizeDist:     fitSizeDist(sizes),
+		BurstDist:    fitBurstDist(burstSizes),
+		GapDist:      fitGapDist(gaps),
+		DirRatio:     &profile.DirectionRatio{UplinkRatio: uplinkRatio},
 	}
 
 	if len(intraBurstGaps) > 0 {

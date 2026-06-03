@@ -39,6 +39,13 @@ const (
 	// DefaultHandshakeTimeout is the timeout for TLS handshake.
 	DefaultHandshakeTimeout = 10 * time.Second
 
+	// socksHandshakeTimeout caps the unauthenticated local SOCKS5 handshake.
+	socksHandshakeTimeout = 10 * time.Second
+
+	// tunnelIdleTimeout caps how long dispatch waits on a blocked stream
+	// before declaring the tunnel unhealthy.
+	tunnelIdleTimeout = 30 * time.Second
+
 	// maxTunnelDataChunk leaves one byte for the Chimney tunnel command prefix
 	// so every H2 DATA frame carries its own 0x02 DATA command.
 	maxTunnelDataChunk = 16*1024 - 1
@@ -477,6 +484,11 @@ func (c *Client) runSOCKS5(manager *tunnelManager) error {
 func (c *Client) handleSOCKS5Conn(clientConn net.Conn, manager *tunnelManager) {
 	defer clientConn.Close()
 
+	if err := clientConn.SetDeadline(time.Now().Add(socksHandshakeTimeout)); err != nil {
+		c.Logger.Debug("failed to set SOCKS5 deadline", "error", err)
+		return
+	}
+
 	// SOCKS5 handshake
 	if err := c.socks5Handshake(clientConn); err != nil {
 		c.Logger.Debug("SOCKS5 handshake failed", "error", err)
@@ -487,6 +499,10 @@ func (c *Client) handleSOCKS5Conn(clientConn net.Conn, manager *tunnelManager) {
 	targetAddr, err := c.socks5ReadRequest(clientConn)
 	if err != nil {
 		c.Logger.Debug("SOCKS5 request failed", "error", err)
+		return
+	}
+	if err := clientConn.SetDeadline(time.Time{}); err != nil {
+		c.Logger.Debug("failed to clear SOCKS5 deadline", "error", err)
 		return
 	}
 
@@ -703,6 +719,8 @@ func (tc *tunnelConn) markDead(err error) {
 
 // dispatchFrames reads frames from the H2 engine and routes them to per-stream channels.
 func (tc *tunnelConn) dispatchFrames() {
+	tc.Conn.SetReadDeadline(time.Now().Add(tunnelIdleTimeout))
+
 	for {
 		select {
 		case <-tc.quit:
@@ -714,14 +732,37 @@ func (tc *tunnelConn) dispatchFrames() {
 			tc.markDead(err)
 			return
 		}
-		tc.mu.Lock()
-		ch, ok := tc.streams[fh.StreamID]
-		tc.mu.Unlock()
-		if ok {
-			select {
-			case ch <- &streamFrame{fh, payload}:
-			default:
-			}
+		tc.Conn.SetReadDeadline(time.Now().Add(tunnelIdleTimeout))
+
+		if !tc.deliverFrame(fh, payload) {
+			return
+		}
+	}
+}
+
+func (tc *tunnelConn) deliverFrame(fh *h2engine.FrameHeader, payload []byte) bool {
+	tc.mu.Lock()
+	ch, ok := tc.streams[fh.StreamID]
+	tc.mu.Unlock()
+	if !ok {
+		return true
+	}
+
+	sf := &streamFrame{fh, payload}
+	select {
+	case ch <- sf:
+		return true
+	default:
+		select {
+		case ch <- sf:
+			return true
+		case <-tc.quit:
+			return false
+		case <-time.After(tunnelIdleTimeout):
+			err := fmt.Errorf("tunnel stream %d blocked for %s", fh.StreamID, tunnelIdleTimeout)
+			tc.Conn.Close()
+			tc.markDead(err)
+			return false
 		}
 	}
 }

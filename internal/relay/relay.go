@@ -72,6 +72,8 @@ var (
 	// ErrWhitelistFailed is returned when whitelist checks fail.
 	// This triggers passive fallback.
 	ErrWhitelistFailed = errors.New("relay: whitelist check failed")
+
+	errStreamCanceled = errors.New("relay: stream canceled")
 )
 
 // Server is the Chimney relay server.
@@ -94,7 +96,6 @@ type Server struct {
 
 	// Active connections
 	wg     sync.WaitGroup
-	mu     sync.RWMutex
 	closed atomic.Bool
 
 	// dialSem limits concurrent backend TCP dials across all tunnels
@@ -552,7 +553,6 @@ func (s *Server) relayHandshake(clientConn, siteConn net.Conn, logger *slog.Logg
 								"recordBuf_sha256", hex.EncodeToString(faHash[:]),
 								"recordBuf_len", len(fa),
 							)
-							recordBuf = recordBuf[:0]
 							close(quit)
 							siteConn.SetReadDeadline(time.Now())
 
@@ -669,14 +669,6 @@ func (c *prependConn) Read(b []byte) (int, error) {
 	return c.Conn.Read(b)
 }
 
-// remainingPrefix returns the portion of the prefix not yet read.
-func (c *prependConn) remainingPrefix() []byte {
-	if c.prefixOff < len(c.prefix) {
-		return c.prefix[c.prefixOff:]
-	}
-	return nil
-}
-
 // performSwap performs the swap operation after successful auth.
 func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRandom, clientRandom, firstAppData []byte, logger *slog.Logger) error {
 	// siteConn is kept alive until auth verification succeeds.
@@ -762,21 +754,6 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 		"sendNonce", hex.EncodeToString(sendNonceBase),
 		"recvNonce", hex.EncodeToString(recvNonceBase),
 	)
-	// Swap key/nonce pairs for the relay:
-	// Client's sendKey ("chimney-sess-send") encrypts client→relay, so relay
-	// must use it as the opener (recv) key. Client's recvKey ("chimney-sess-recv")
-	// decrypts relay→client, so relay must use it as the sealer (send) key.
-	// Same logic applies to nonce bases (info order matters for derivation).
-	codec, err := record.NewCodecWithDirectionalKeys(recvKey, recvNonceBase, sendKey, sendNonceBase)
-	if err != nil {
-		kSess, _ := matchedDeriver.DeriveSessionKey(serverRandom, clientRandom)
-		nonceBase, _ := matchedDeriver.DeriveNonceBase(serverRandom, clientRandom)
-		codec, err = record.NewCodec(kSess, nonceBase)
-		if err != nil {
-			return fmt.Errorf("create codec: %w", err)
-		}
-	}
-
 	// Forward any prelude (non-Chimney) records to the real site.
 	if len(preludeRecords) > 0 {
 		logger.Debug("forwarding prelude records to site", "bytes", len(preludeRecords))
@@ -789,7 +766,7 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 
 	// Create a fresh codec for actual I/O (nonce starts at 0).
 	// The previous codec was only used for scanning.
-	codec, err = record.NewCodecWithDirectionalKeys(recvKey, recvNonceBase, sendKey, sendNonceBase)
+	codec, err := record.NewCodecWithDirectionalKeys(recvKey, recvNonceBase, sendKey, sendNonceBase)
 	if err != nil {
 		kSess, _ := matchedDeriver.DeriveSessionKey(serverRandom, clientRandom)
 		nonceBase, _ := matchedDeriver.DeriveNonceBase(serverRandom, clientRandom)
@@ -927,18 +904,23 @@ type tunnelConnPool struct {
 	mu            sync.Mutex
 	streams       map[uint32]net.Conn
 	writeChs      map[uint32]chan<- []byte // per-stream write channels
-	pending       map[uint32][][]byte
-	dest          string
+	pending       map[uint32]*pendingStream
 	backendDialer func(ctx context.Context, network, addr string) (net.Conn, error)
 	dialSem       chan struct{} // limits concurrent backend dials (shared across tunnels)
 	connSem       chan struct{} // limits total open backend conns (shared across tunnels)
+}
+
+type pendingStream struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	bufs   [][]byte
 }
 
 func newTunnelConnPool(backendDialer func(ctx context.Context, network, addr string) (net.Conn, error), dialSem, connSem chan struct{}) *tunnelConnPool {
 	return &tunnelConnPool{
 		streams:       make(map[uint32]net.Conn),
 		writeChs:      make(map[uint32]chan<- []byte),
-		pending:       make(map[uint32][][]byte),
+		pending:       make(map[uint32]*pendingStream),
 		backendDialer: backendDialer,
 		dialSem:       dialSem,
 		connSem:       connSem,
@@ -956,21 +938,38 @@ func (p *tunnelConnPool) getOrCreate(streamID uint32) (net.Conn, error) {
 }
 
 func (p *tunnelConnPool) createForStream(streamID uint32, dest string) (net.Conn, error) {
+	p.mu.Lock()
+	pending := p.pending[streamID]
+	p.mu.Unlock()
+	if pending == nil {
+		return nil, errStreamCanceled
+	}
+
 	// Acquire connection slot first — this provides backpressure when the
 	// tunnel already has maxBackendConnsPerTunnel open backend connections.
-	p.connSem <- struct{}{}
+	select {
+	case p.connSem <- struct{}{}:
+	case <-pending.ctx.Done():
+		return nil, errStreamCanceled
+	}
 
 	// Acquire dial semaphore to prevent overwhelming the backend server's
 	// listen backlog with simultaneous TCP dials across all tunnels.
-	p.dialSem <- struct{}{}
+	select {
+	case p.dialSem <- struct{}{}:
+	case <-pending.ctx.Done():
+		<-p.connSem
+		return nil, errStreamCanceled
+	}
 	defer func() { <-p.dialSem }()
 
 	var conn net.Conn
 	var err error
 	if p.backendDialer != nil {
-		conn, err = p.backendDialer(context.Background(), "tcp", dest)
+		conn, err = p.backendDialer(pending.ctx, "tcp", dest)
 	} else {
-		conn, err = net.DialTimeout("tcp", dest, 10*time.Second)
+		dialer := net.Dialer{Timeout: 10 * time.Second}
+		conn, err = dialer.DialContext(pending.ctx, "tcp", dest)
 	}
 	if err != nil {
 		<-p.connSem // release slot on dial failure
@@ -981,6 +980,12 @@ func (p *tunnelConnPool) createForStream(streamID uint32, dest string) (net.Conn
 	}
 
 	p.mu.Lock()
+	if p.pending[streamID] == nil || p.pending[streamID].ctx.Err() != nil {
+		p.mu.Unlock()
+		conn.Close()
+		<-p.connSem
+		return nil, errStreamCanceled
+	}
 	p.streams[streamID] = conn
 	p.mu.Unlock()
 	return conn, nil
@@ -990,6 +995,10 @@ func (p *tunnelConnPool) closeStream(streamID uint32) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if pending, ok := p.pending[streamID]; ok {
+		pending.cancel()
+		delete(p.pending, streamID)
+	}
 	if conn, ok := p.streams[streamID]; ok {
 		conn.Close()
 		delete(p.streams, streamID)
@@ -1003,18 +1012,19 @@ func (p *tunnelConnPool) closeStream(streamID uint32) {
 func (p *tunnelConnPool) addPending(streamID uint32) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.pending[streamID] = nil
+	ctx, cancel := context.WithCancel(context.Background())
+	p.pending[streamID] = &pendingStream{ctx: ctx, cancel: cancel}
 }
 
 func (p *tunnelConnPool) bufferForPending(streamID uint32, data []byte) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	bufs, ok := p.pending[streamID]
-	if !ok {
+	pending, ok := p.pending[streamID]
+	if !ok || pending.ctx.Err() != nil {
 		return false
 	}
 	total := 0
-	for _, d := range bufs {
+	for _, d := range pending.bufs {
 		total += len(d)
 	}
 	if total+len(data) > maxPendingBytesPerStream {
@@ -1022,7 +1032,7 @@ func (p *tunnelConnPool) bufferForPending(streamID uint32, data []byte) bool {
 	}
 	d := make([]byte, len(data))
 	copy(d, data)
-	p.pending[streamID] = append(bufs, d)
+	pending.bufs = append(pending.bufs, d)
 	return true
 }
 
@@ -1042,12 +1052,19 @@ func (p *tunnelConnPool) pendingCount() int {
 func (p *tunnelConnPool) removePending(streamID uint32) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if pending, ok := p.pending[streamID]; ok {
+		pending.cancel()
+	}
 	delete(p.pending, streamID)
 }
 
 func (p *tunnelConnPool) flushPending(streamID uint32, writeCh chan<- []byte) {
 	p.mu.Lock()
-	bufs := p.pending[streamID]
+	var bufs [][]byte
+	if pending := p.pending[streamID]; pending != nil {
+		bufs = pending.bufs
+		pending.cancel()
+	}
 	delete(p.pending, streamID)
 	p.mu.Unlock()
 	for _, data := range bufs {
@@ -1112,7 +1129,8 @@ func (p *tunnelConnPool) closeAll() {
 		close(ch)
 		delete(p.writeChs, id)
 	}
-	for id := range p.pending {
+	for id, pending := range p.pending {
+		pending.cancel()
 		delete(p.pending, id)
 	}
 }
@@ -1375,6 +1393,11 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 			// Reject streams that exceed the per-stream pending buffer limit
 			// to prevent OOM when connSem is saturated during heavy upload.
 			if pool.isPending(fh.StreamID) {
+				if cmd == 0x03 {
+					logger.Debug("CLOSE pending stream", "stream_id", fh.StreamID)
+					pool.closeStream(fh.StreamID)
+					continue
+				}
 				if !pool.bufferForPending(fh.StreamID, payload) {
 					logger.Debug("pending buffer overflow, rejecting stream", "stream_id", fh.StreamID)
 					rstFrame := h2engine.RSTStreamFrame(fh.StreamID, h2engine.H2ErrEnhanceYourCalm)
