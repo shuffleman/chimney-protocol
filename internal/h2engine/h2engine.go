@@ -146,7 +146,7 @@ func DefaultSettings() *Settings {
 		InitialWindowSize:    &initialWindowSize,
 		MaxFrameSize:         &maxFrameSize,
 		MaxHeaderListSize:    &maxHeaderListSize,
-		MaxFrameSizeActual:   16384,
+		MaxFrameSizeActual:   4096,
 	}
 }
 
@@ -447,12 +447,15 @@ func (e *Engine) AcceptAsServer() error {
 	// Remaining data after preface is the client's SETTINGS frame
 	remaining := data[len(H2ConnectionPreface):]
 
-	// Parse client SETTINGS
+	// Parse client SETTINGS and respect MAX_FRAME_SIZE: the relay must not send
+	// frames larger than the client's advertised maximum.
 	if len(remaining) >= FrameHeaderLen {
 		fh, err := DecodeFrameHeader(remaining)
-		if err == nil && fh.Type == FrameSettings {
-			// Process client settings (optional: apply them)
-			_, _ = DecodeSettings(remaining[FrameHeaderLen : FrameHeaderLen+fh.Length])
+		if err == nil && fh.Type == FrameSettings && len(remaining) >= FrameHeaderLen+int(fh.Length) {
+			clientSettings, _ := DecodeSettings(remaining[FrameHeaderLen : FrameHeaderLen+int(fh.Length)])
+			if clientMaxFrame, ok := clientSettings[SettingMaxFrameSize]; ok && clientMaxFrame < e.settings.MaxFrameSizeActual {
+				e.settings.MaxFrameSizeActual = clientMaxFrame
+			}
 		}
 	}
 
