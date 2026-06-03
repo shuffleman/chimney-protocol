@@ -1,8 +1,11 @@
 package chimney
 
 import (
+	"context"
+	"errors"
 	"net"
 	"testing"
+	"time"
 )
 
 func TestParseFingerprint_Valid(t *testing.T) {
@@ -64,5 +67,97 @@ func TestAddr(t *testing.T) {
 	}
 	if a.String() != "127.0.0.1:443" {
 		t.Errorf("expected 127.0.0.1:443, got %s", a.String())
+	}
+}
+
+func TestStreamConnReadDeadline(t *testing.T) {
+	c := &streamConn{
+		t:  &tunnel{quit: make(chan struct{})},
+		ch: make(chan *streamFrame),
+	}
+	if err := c.SetReadDeadline(time.Now().Add(10 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := c.Read(make([]byte, 1))
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("expected net timeout error, got %T %v", err, err)
+	}
+}
+
+func TestStreamConnSetReadDeadlineWakesBlockedRead(t *testing.T) {
+	c := &streamConn{
+		t:  &tunnel{quit: make(chan struct{})},
+		ch: make(chan *streamFrame),
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := c.Read(make([]byte, 1))
+		errCh <- err
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	if err := c.SetReadDeadline(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errCh:
+		var netErr net.Error
+		if !errors.As(err, &netErr) || !netErr.Timeout() {
+			t.Fatalf("expected net timeout error, got %T %v", err, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked Read was not woken by SetReadDeadline")
+	}
+}
+
+func TestStreamConnWriteDeadlineExpired(t *testing.T) {
+	c := &streamConn{
+		t:  &tunnel{quit: make(chan struct{})},
+		ch: make(chan *streamFrame),
+	}
+	if err := c.SetWriteDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := c.Write([]byte("x"))
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("expected net timeout error, got %T %v", err, err)
+	}
+}
+
+func TestListenPacketContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	d := &Dialer{}
+	_, err := d.ListenPacket(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestListenPacketRejectsSecondPacketConn(t *testing.T) {
+	tun := &tunnel{
+		streams: make(map[uint32]chan *streamFrame),
+		quit:    make(chan struct{}),
+	}
+	d := &Dialer{pool: []*tunnel{tun}}
+
+	if _, err := d.ListenPacket(context.Background()); err != nil {
+		t.Fatalf("first ListenPacket failed: %v", err)
+	}
+	if _, err := d.ListenPacket(context.Background()); err == nil {
+		t.Fatal("expected second ListenPacket to fail")
 	}
 }

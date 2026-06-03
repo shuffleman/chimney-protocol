@@ -128,6 +128,7 @@ type tunnel struct {
 	dead      chan struct{}
 	closed    bool
 	lastError error // set when dispatchFrames exits on read error
+	udpInUse  bool
 }
 
 // LastError returns the error that caused dispatchFrames to exit, if any.
@@ -202,8 +203,10 @@ type streamConn struct {
 
 	readBuf []byte // leftover data from partial read of an H2 frame payload
 
-	readDeadline  time.Time
-	writeDeadline time.Time
+	deadlineMu          sync.Mutex
+	readDeadline        time.Time
+	writeDeadline       time.Time
+	readDeadlineChanged chan struct{}
 }
 
 // addr is a trivial net.Addr implementation.
@@ -216,41 +219,56 @@ func (a addr) String() string  { return a.str }
 // Uses an internal readBuf to prevent data loss when callers read in small chunks
 // (e.g., crypto/tls reading a 5-byte TLS record header before the record body).
 func (c *streamConn) Read(p []byte) (int, error) {
-	if len(c.readBuf) > 0 {
-		n := copy(p, c.readBuf)
-		c.readBuf = c.readBuf[n:]
-		return n, nil
-	}
+	for {
+		if len(c.readBuf) > 0 {
+			n := copy(p, c.readBuf)
+			c.readBuf = c.readBuf[n:]
+			return n, nil
+		}
 
-	select {
-	case sf, ok := <-c.ch:
-		if !ok {
-			return 0, io.EOF
+		deadline, changed := c.readDeadlineState()
+		timer, expired := deadlineTimer(deadline)
+		if expired {
+			return 0, &net.OpError{Op: "read", Net: "chimney", Err: &timeoutError{}}
 		}
-		if sf.fh.Type == h2engine.FrameData && len(sf.payload) > 0 {
-			switch sf.payload[0] {
-			case 0x02: // DATA with chimney prefix
-				data := sf.payload[1:]
-				n := copy(p, data)
-				if n < len(data) {
-					c.readBuf = append(c.readBuf, data[n:]...)
-				}
-				return n, nil
-			case 0x03: // CLOSE
+
+		select {
+		case sf, ok := <-c.ch:
+			stopTimer(timer)
+			if !ok {
 				return 0, io.EOF
-			default:
-				// No chimney prefix — continuation of a fragmented write.
-				// The entire payload is raw data.
-				n := copy(p, sf.payload)
-				if n < len(sf.payload) {
-					c.readBuf = append(c.readBuf, sf.payload[n:]...)
-				}
-				return n, nil
 			}
+			if sf.fh.Type == h2engine.FrameData && len(sf.payload) > 0 {
+				switch sf.payload[0] {
+				case 0x02: // DATA with chimney prefix
+					data := sf.payload[1:]
+					n := copy(p, data)
+					if n < len(data) {
+						c.readBuf = append(c.readBuf, data[n:]...)
+					}
+					return n, nil
+				case 0x03: // CLOSE
+					return 0, io.EOF
+				default:
+					// No chimney prefix — continuation of a fragmented write.
+					// The entire payload is raw data.
+					n := copy(p, sf.payload)
+					if n < len(sf.payload) {
+						c.readBuf = append(c.readBuf, sf.payload[n:]...)
+					}
+					return n, nil
+				}
+			}
+			return 0, nil
+		case <-c.t.quit:
+			stopTimer(timer)
+			return 0, io.ErrClosedPipe
+		case <-timerC(timer):
+			return 0, &net.OpError{Op: "read", Net: "chimney", Err: &timeoutError{}}
+		case <-changed:
+			stopTimer(timer)
+			continue
 		}
-		return 0, nil
-	case <-c.t.quit:
-		return 0, io.ErrClosedPipe
 	}
 }
 
@@ -292,6 +310,10 @@ func (c *streamConn) Write(p []byte) (int, error) {
 }
 
 func (c *streamConn) writeCommandFrame(cmd byte, payload []byte, targetSize uint16) error {
+	if expired := c.prepareWriteDeadline(); expired {
+		return &net.OpError{Op: "write", Net: "chimney", Err: &timeoutError{}}
+	}
+
 	needed := 1 + len(payload)
 
 	// Use pool for typical frame sizes; allocate directly for oversized writes.
@@ -314,6 +336,61 @@ func (c *streamConn) writeCommandFrame(cmd byte, payload []byte, targetSize uint
 		return c.t.h2Eng.WritePaddedRecord(c.streamID, data, targetSize, false)
 	}
 	return c.t.h2Eng.WriteData(c.streamID, data, false)
+}
+
+func (c *streamConn) readDeadlineState() (time.Time, <-chan struct{}) {
+	c.deadlineMu.Lock()
+	if c.readDeadlineChanged == nil {
+		c.readDeadlineChanged = make(chan struct{})
+	}
+	deadline := c.readDeadline
+	changed := c.readDeadlineChanged
+	c.deadlineMu.Unlock()
+	return deadline, changed
+}
+
+func deadlineTimer(deadline time.Time) (*time.Timer, bool) {
+	if deadline.IsZero() {
+		return nil, false
+	}
+	d := time.Until(deadline)
+	if d <= 0 {
+		return nil, true
+	}
+	return time.NewTimer(d), false
+}
+
+func timerC(timer *time.Timer) <-chan time.Time {
+	if timer == nil {
+		return nil
+	}
+	return timer.C
+}
+
+func stopTimer(timer *time.Timer) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+
+func (c *streamConn) prepareWriteDeadline() bool {
+	c.deadlineMu.Lock()
+	deadline := c.writeDeadline
+	c.deadlineMu.Unlock()
+
+	if deadline.IsZero() {
+		return false
+	}
+	if time.Until(deadline) <= 0 {
+		return true
+	}
+	return false
 }
 
 // IsDead returns true when all tunnels' dispatch goroutines have exited,
@@ -365,19 +442,34 @@ func (c *streamConn) LocalAddr() net.Addr  { return addr{"chimney", "client"} }
 func (c *streamConn) RemoteAddr() net.Addr { return addr{"chimney", "relay"} }
 
 func (c *streamConn) SetDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
 	c.readDeadline = t
 	c.writeDeadline = t
+	c.signalReadDeadlineChangedLocked()
+	c.deadlineMu.Unlock()
 	return nil
 }
 
 func (c *streamConn) SetReadDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
 	c.readDeadline = t
+	c.signalReadDeadlineChangedLocked()
 	return nil
 }
 
 func (c *streamConn) SetWriteDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
 	c.writeDeadline = t
+	c.deadlineMu.Unlock()
 	return nil
+}
+
+func (c *streamConn) signalReadDeadlineChangedLocked() {
+	if c.readDeadlineChanged != nil {
+		close(c.readDeadlineChanged)
+	}
+	c.readDeadlineChanged = make(chan struct{})
 }
 
 // ---------------------------------------------------------------------------
@@ -570,7 +662,11 @@ func (u *udpConn) Close() error {
 	u.closed = true
 	u.mu.Unlock()
 
-	return u.stream.Close()
+	err := u.stream.Close()
+	u.t.mu.Lock()
+	u.t.udpInUse = false
+	u.t.mu.Unlock()
+	return err
 }
 
 func (u *udpConn) LocalAddr() net.Addr  { return addr{"chimney-udp", "client"} }
@@ -608,6 +704,10 @@ func (e *timeoutError) Temporary() bool { return true }
 // A single H2 stream carries all UDP datagrams; H2 DATA frame boundaries
 // provide natural message delimiting.
 func (d *Dialer) ListenPacket(ctx context.Context) (net.PacketConn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
@@ -622,6 +722,11 @@ func (d *Dialer) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 
 	ch := make(chan *streamFrame, 256)
 	t.mu.Lock()
+	if t.udpInUse {
+		t.mu.Unlock()
+		return nil, fmt.Errorf("chimney: UDP packet connection already open")
+	}
+	t.udpInUse = true
 	t.streams[udpStreamID] = ch
 	t.mu.Unlock()
 
@@ -653,6 +758,10 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 		tcpConn.SetReadBuffer(tcpBufSize)
 		tcpConn.SetWriteBuffer(tcpBufSize)
 		tcpConn.SetNoDelay(true)
+	}
+	if err := rawConn.SetDeadline(time.Now().Add(config.HandshakeTimeout)); err != nil {
+		rawConn.Close()
+		return nil, fmt.Errorf("chimney: set handshake deadline: %w", err)
 	}
 
 	// Step 2: uTLS handshake
@@ -788,6 +897,10 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 	if err := recWriter.WriteRecord(tagFrame); err != nil {
 		uConn.Close()
 		return nil, fmt.Errorf("chimney: send auth tag: %w", err)
+	}
+	if err := rawTCPConn.SetDeadline(time.Time{}); err != nil {
+		uConn.Close()
+		return nil, fmt.Errorf("chimney: clear handshake deadline: %w", err)
 	}
 
 	t := &tunnel{
@@ -1046,9 +1159,10 @@ func (t *tunnel) dispatchFrames() {
 		if err != nil {
 			sealerSeq, openerSeq := t.h2Eng.CodecSeqs()
 			sealerTrail, openerTrail := t.h2Eng.CodecTrails()
-			t.lastError = fmt.Errorf("frame read: %w [sealer_seq=%d opener_seq=%d]\nsealer trail (last 32):\n%s\nopener trail (last 32):\n%s",
+			lastErr := fmt.Errorf("frame read: %w [sealer_seq=%d opener_seq=%d]\nsealer trail (last 32):\n%s\nopener trail (last 32):\n%s",
 				err, sealerSeq, openerSeq, sealerTrail, openerTrail)
 			t.mu.Lock()
+			t.lastError = lastErr
 			for _, ch := range t.streams {
 				close(ch)
 			}
