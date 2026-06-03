@@ -945,7 +945,7 @@ func NewDialer(config Config) (*Dialer, error) {
 
 	if config.PSK == "" {
 		if config.UserID == "" {
-			config.UserID = "default"
+			return nil, fmt.Errorf("chimney: PSK or UserID is required")
 		}
 		config.PSK = hex.EncodeToString(auth.DerivePSKFromID(config.UserID))
 	}

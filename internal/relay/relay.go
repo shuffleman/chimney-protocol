@@ -333,7 +333,9 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	logger.Debug("new connection")
 
 	// Step 1: Read ClientHello and extract SNI + ClientRandom
+	clientConn.SetReadDeadline(time.Now().Add(s.config.HandshakeTimeout))
 	clientHello, sni, clientRandom, err := s.readClientHello(clientConn)
+	clientConn.SetReadDeadline(time.Time{})
 	if err != nil {
 		logger.Debug("failed to read ClientHello", "error", err)
 		s.passiveFallback(clientConn, nil, logger)

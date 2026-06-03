@@ -108,13 +108,15 @@ func main() {
 	}
 
 	uid := *userID
-	if uid == "" {
-		uid = "default"
-	}
-
 	psk := *pskHex
 	if psk == "" {
+		if uid == "" {
+			logger.Error("missing credentials", "error", "provide -psk or -user-id")
+			os.Exit(1)
+		}
 		psk = hex.EncodeToString(auth.DerivePSKFromID(uid))
+	} else if uid == "" {
+		uid = "default"
 	}
 
 	client := &Client{

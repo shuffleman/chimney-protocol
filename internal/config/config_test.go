@@ -54,10 +54,10 @@ func TestRelayConfig_Validate(t *testing.T) {
 		{
 			name: "valid config",
 			config: &RelayConfig{
-				ListenAddr:   ":443",
-				PSK:          "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678",
-				TagLen:       16,
-				CloudRegion:  "us-east-1",
+				ListenAddr:  ":443",
+				PSK:         "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678",
+				TagLen:      16,
+				CloudRegion: "us-east-1",
 			},
 			wantErr: false,
 		},
@@ -227,7 +227,7 @@ func TestSaveRelayConfig(t *testing.T) {
 
 	config := &RelayConfig{
 		ListenAddr:       ":9443",
-		PSK:              "testpsk123456789",
+		PSK:              "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678",
 		TagLen:           16,
 		CloudRegion:      "ap-southeast-1",
 		HandshakeTimeout: 10 * time.Second,

@@ -62,6 +62,9 @@ func NewAuthenticator(psk []byte, tagLen int) (*Authenticator, error) {
 	if tagLen < MinTagLen || tagLen > MaxTagLen {
 		return nil, fmt.Errorf("%w: %d (must be %d-%d)", ErrInvalidTagLen, tagLen, MinTagLen, MaxTagLen)
 	}
+	if len(psk) != keyderiv.DefaultKeyLen {
+		return nil, fmt.Errorf("auth: invalid PSK length: got %d bytes, want %d", len(psk), keyderiv.DefaultKeyLen)
+	}
 	return &Authenticator{
 		deriver: keyderiv.NewDeriver(psk),
 		tagLen:  tagLen,
@@ -400,6 +403,9 @@ func NewUserStore(users map[string]string, tagLen int) (*UserStore, error) {
 		if err != nil {
 			return nil, fmt.Errorf("auth: invalid PSK for user %q: %w", userID, err)
 		}
+		if len(psk) != keyderiv.DefaultKeyLen {
+			return nil, fmt.Errorf("auth: invalid PSK length for user %q: got %d bytes, want %d", userID, len(psk), keyderiv.DefaultKeyLen)
+		}
 		hint := keyderiv.ComputeKeyHint(userID)
 		if _, exists := store.byHint[hint]; exists {
 			return nil, fmt.Errorf("auth: key hint collision for user %q (hint %x already taken)", userID, hint)
@@ -495,6 +501,9 @@ func (s *UserStore) AddUser(userID, pskHex string) error {
 	psk, err := hex.DecodeString(pskHex)
 	if err != nil {
 		return fmt.Errorf("auth: invalid PSK for user %q: %w", userID, err)
+	}
+	if len(psk) != keyderiv.DefaultKeyLen {
+		return fmt.Errorf("auth: invalid PSK length for user %q: got %d bytes, want %d", userID, len(psk), keyderiv.DefaultKeyLen)
 	}
 
 	hint := keyderiv.ComputeKeyHint(userID)

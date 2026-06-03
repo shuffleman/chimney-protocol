@@ -279,6 +279,7 @@ make run-client
 | `cidr_refresh_interval` | duration | 否 | 配置字段存在，admin refresh 当前仍偏占位 |
 | `log_level` | string | 否 | `debug`、`info`、`warn`、`error` |
 | `metrics_addr` | string | 否 | 启动 JSON admin API，不是 Prometheus 文本指标 |
+| `metrics_token` | string | 否 | Admin API token；为空时 `/admin/*` 仅允许 loopback client |
 
 当前速度测试配置 `config/relay-speedtest.yaml`：
 
@@ -1153,9 +1154,16 @@ curl.exe -x socks5h://127.0.0.1:1080 -o NUL http://speedtest.tokyo2.linode.com/1
 
 ```yaml
 metrics_addr: "127.0.0.1:8080"
+metrics_token: "change-this-token"
 ```
 
 会启动 HTTP admin API。
+
+Admin 鉴权规则：
+
+- `/health` 不需要 token。
+- `/admin/*` 如果配置了 `metrics_token`，请求必须带 `Authorization: Bearer <token>` 或 `X-Admin-Token: <token>`。
+- 如果 `metrics_token` 为空，`/admin/*` 只接受 loopback client。生产环境仍建议显式配置 token，并把 `metrics_addr` 绑定到 `127.0.0.1` 或放在带鉴权的内网入口后。
 
 健康检查：
 
@@ -1193,7 +1201,7 @@ curl -X DELETE http://127.0.0.1:8080/admin/users \
 
 注意：
 
-- 当前 admin API 没有鉴权，生产环境不要直接暴露公网。
+- Admin API 支持 token 鉴权；没有 token 时只允许 loopback client。生产环境不要直接裸露公网。
 - `/admin/refresh-cidrs` 当前返回成功 JSON，但实际 refresh 逻辑仍需完善。
 - `metrics_addr` 名称容易误解；当前返回 JSON，不是 Prometheus exposition format。
 
@@ -1358,7 +1366,7 @@ git push origin vX.Y.Z
 - CLI client 是单 tunnel；根包 Dialer 才有 `PoolSize` tunnel pool。
 - `profile_dir` 字段存在，但 relay 端按站点 profile 加载仍不完整。
 - dilution 当前由 client/root package 发送预录制内容块，relay 识别 reserved stream 后丢弃。
-- admin API 没有鉴权。
+- Admin API 支持 token 鉴权；未配置 token 时只允许 loopback client。
 - `/admin/refresh-cidrs` 当前仍偏占位。
 - Makefile `run-client` 与当前 CLI 不匹配。
 - README 中部分协议描述偏设计视角，真实实现以代码为准。
@@ -1374,7 +1382,7 @@ git push origin vX.Y.Z
 4. 给 CLI client 增加主动健康检查或 idle keepalive，让断线不必等下一次请求才发现。
 5. 增加自动化集成测试：启动真实 relay/client，kill relay，确认 client 自动重连。
 6. 完善 relay graceful shutdown，避免 systemd restart 长时间 deactivating。
-7. 给 admin API 增加鉴权和绑定本地地址的部署示例。
+7. 给 admin API 增加更完整的权限模型、审计日志和限流。
 8. 实现真实 CIDR refresh，并让 `/admin/refresh-cidrs` 调用实际逻辑。
 9. 明确 profile 加载策略，让 `intent.yaml` 的 SETTINGS/profile 与 H2 engine 配置闭环。
 10. 如需代理 UDP，给 CLI SOCKS5 实现 UDP ASSOCIATE 并映射到根包 UDP stream。

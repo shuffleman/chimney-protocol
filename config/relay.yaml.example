@@ -58,4 +58,8 @@ cidr_refresh_interval: 24h
 log_level: "info"
 
 # Metrics endpoint address (optional, empty to disable)
-metrics_addr: ":8080"
+# Admin endpoints require metrics_token, or are restricted to loopback clients
+# when metrics_token is empty. Prefer binding to localhost unless a trusted
+# reverse proxy adds authentication.
+metrics_addr: "127.0.0.1:8080"
+metrics_token: ""

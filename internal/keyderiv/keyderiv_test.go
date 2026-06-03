@@ -305,6 +305,13 @@ func TestNewDeriverFromHex_InvalidHex(t *testing.T) {
 	}
 }
 
+func TestNewDeriverFromHex_InvalidLength(t *testing.T) {
+	_, err := NewDeriverFromHex("deadbeef")
+	if err == nil {
+		t.Error("Expected error for short PSK, got nil")
+	}
+}
+
 func BenchmarkDeriveAuthKey(b *testing.B) {
 	psk := make([]byte, 32)
 	io.ReadFull(rand.Reader, psk)

@@ -2,6 +2,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"time"
@@ -64,6 +65,10 @@ type RelayConfig struct {
 	// MetricsAddr is the address for Prometheus metrics endpoint.
 	// If empty, metrics are disabled.
 	MetricsAddr string `yaml:"metrics_addr,omitempty"`
+
+	// MetricsToken protects admin endpoints. If empty, admin endpoints are
+	// restricted to loopback clients only.
+	MetricsToken string `yaml:"metrics_token,omitempty"`
 }
 
 // ClientConfig is the configuration for the client.
@@ -135,6 +140,16 @@ func (c *RelayConfig) Validate() error {
 	if c.PSK == "" && len(c.Users) == 0 && len(c.UserIDs) == 0 {
 		return fmt.Errorf("config: one of psk, users, or user_ids is required")
 	}
+	if c.PSK != "" {
+		if err := validateHexPSK("psk", c.PSK); err != nil {
+			return err
+		}
+	}
+	for userID, psk := range c.Users {
+		if err := validateHexPSK("users."+userID, psk); err != nil {
+			return err
+		}
+	}
 	if c.TagLen < 8 || c.TagLen > 32 {
 		return fmt.Errorf("config: tag_len must be between 8 and 32")
 	}
@@ -162,9 +177,22 @@ func (c *ClientConfig) Validate() error {
 		if c.UserID == "" {
 			return fmt.Errorf("config: psk or user_id is required")
 		}
+	} else if err := validateHexPSK("psk", c.PSK); err != nil {
+		return err
 	}
 	if c.TagLen < 8 || c.TagLen > 32 {
 		return fmt.Errorf("config: tag_len must be between 8 and 32")
+	}
+	return nil
+}
+
+func validateHexPSK(field, value string) error {
+	psk, err := hex.DecodeString(value)
+	if err != nil {
+		return fmt.Errorf("config: %s must be hex: %w", field, err)
+	}
+	if len(psk) != 32 {
+		return fmt.Errorf("config: %s must decode to 32 bytes, got %d", field, len(psk))
 	}
 	return nil
 }

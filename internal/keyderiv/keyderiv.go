@@ -64,6 +64,9 @@ func NewDeriverFromHex(pskHex string) (*Deriver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("keyderiv: invalid PSK hex: %w", err)
 	}
+	if len(psk) != DefaultKeyLen {
+		return nil, fmt.Errorf("keyderiv: invalid PSK length: got %d bytes, want %d", len(psk), DefaultKeyLen)
+	}
 	return NewDeriver(psk), nil
 }
 

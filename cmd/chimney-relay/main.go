@@ -21,9 +21,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -97,7 +99,11 @@ func main() {
 
 	// Start admin API if metrics address is configured
 	if cfg.MetricsAddr != "" {
-		go startAdminAPI(cfg.MetricsAddr, server, logger)
+		adminToken := cfg.MetricsToken
+		if adminToken == "" {
+			adminToken = os.Getenv("CHIMNEY_ADMIN_TOKEN")
+		}
+		go startAdminAPI(cfg.MetricsAddr, adminToken, server, logger)
 	}
 
 	// Wait for interrupt signal
@@ -134,8 +140,19 @@ func main() {
 }
 
 // startAdminAPI starts a minimal HTTP server for metrics and admin actions.
-func startAdminAPI(addr string, server *relay.Server, logger *slog.Logger) {
-	http.HandleFunc("/admin/stats", func(w http.ResponseWriter, r *http.Request) {
+func startAdminAPI(addr, adminToken string, server *relay.Server, logger *slog.Logger) {
+	mux := http.NewServeMux()
+	requireAdmin := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !adminAuthorized(r, adminToken) {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next(w, r)
+		}
+	}
+
+	mux.HandleFunc("/admin/stats", requireAdmin(func(w http.ResponseWriter, r *http.Request) {
 		stats := server.Stats()
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{
@@ -155,24 +172,24 @@ func startAdminAPI(addr string, server *relay.Server, logger *slog.Logger) {
 			stats.RelayBytesUp.Load(),
 			stats.RelayBytesDown.Load(),
 		)
-	})
+	}))
 
-	http.HandleFunc("/admin/refresh-cidrs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/admin/refresh-cidrs", requireAdmin(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"status": "ok", "message": "CIDR refresh triggered"}`)
-	})
+	}))
 
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "OK")
 	})
 
 	// ── Dynamic User Management ──────────────────────────────
-	http.HandleFunc("/admin/users", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/admin/users", requireAdmin(func(w http.ResponseWriter, r *http.Request) {
 		us := server.UserStore()
 		w.Header().Set("Content-Type", "application/json")
 
@@ -232,10 +249,30 @@ func startAdminAPI(addr string, server *relay.Server, logger *slog.Logger) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed"})
 		}
-	})
+	}))
 
+	if adminToken == "" {
+		logger.Warn("admin API token is empty; /admin endpoints are restricted to loopback clients only", "addr", addr)
+	}
 	logger.Info("admin API listening", "addr", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	if err := http.ListenAndServe(addr, mux); err != nil {
 		logger.Error("admin API failed", "error", err)
 	}
+}
+
+func adminAuthorized(r *http.Request, adminToken string) bool {
+	if adminToken != "" {
+		authz := r.Header.Get("Authorization")
+		if strings.HasPrefix(authz, "Bearer ") && strings.TrimSpace(strings.TrimPrefix(authz, "Bearer ")) == adminToken {
+			return true
+		}
+		return r.Header.Get("X-Admin-Token") == adminToken
+	}
+
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

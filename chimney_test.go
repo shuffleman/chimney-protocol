@@ -161,3 +161,13 @@ func TestListenPacketRejectsSecondPacketConn(t *testing.T) {
 		t.Fatal("expected second ListenPacket to fail")
 	}
 }
+
+func TestNewDialerRequiresCredentials(t *testing.T) {
+	_, err := NewDialer(Config{
+		RelayAddr: "127.0.0.1:1",
+		SNI:       "example.com",
+	})
+	if err == nil {
+		t.Fatal("expected missing credentials error")
+	}
+}
