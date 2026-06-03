@@ -4,7 +4,8 @@
 #
 # Source: AWS IP Ranges for us-east-1
 # https://ip-ranges.amazonaws.com/ip-ranges.json
-# Refresh: Run `chimney-relay -refresh-cidrs` to update from cloud provider APIs
+# Refresh: /admin/refresh-cidrs currently returns an acknowledgement only;
+# use internal whitelist RefreshAWS tooling or regenerate this file externally.
 
 version: 1
 updated_at: 2026-05-29T00:00:00Z

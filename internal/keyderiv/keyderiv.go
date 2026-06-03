@@ -8,9 +8,13 @@
 //
 //	K_sess = HKDF(PSK, label="chimney-sess", info = ServerRandom || ClientRandom)
 //
-// Auth tag:
+// Current auth tag:
 //
-//	tag = HMAC(K_auth, ServerRandom || <observable bytes of the record>)[:TAG_LEN]
+//	tag = HMAC(K_auth, ServerRandom || ClientRandom)[:TAG_LEN]
+//
+// The parameter is still named recordBytes in the lower-level helper for
+// compatibility with older tests and the original design, but current client
+// and relay paths pass ClientRandom as that second HMAC input.
 package keyderiv
 
 import (
@@ -142,13 +146,14 @@ func (d *Deriver) DeriveDirectionalKeys(serverRandom, clientRandom []byte) (send
 	return sendKey, recvKey, nil
 }
 
-// AuthTag computes the authentication tag:
+// AuthTag computes the authentication tag over caller-provided context bytes:
 //
 //	tag = HMAC-SHA256(K_auth, ServerRandom || recordBytes)[:tagLen]
 //
 // K_auth is derived internally from PSK and ServerRandom.
-// recordBytes are the observable bytes of the first application_data record
-// (the 5-byte header + ciphertext; i.e., what goes on the wire).
+// In the current protocol implementation, recordBytes is ClientRandom. Older
+// tests and helpers still use this generic name because the first design used
+// observable TLS record bytes as the second HMAC input.
 func (d *Deriver) AuthTag(serverRandom, recordBytes []byte, tagLen int) ([]byte, error) {
 	kAuth, err := d.DeriveAuthKey(serverRandom)
 	if err != nil {

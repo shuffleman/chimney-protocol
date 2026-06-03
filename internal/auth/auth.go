@@ -1,11 +1,12 @@
 // Package auth implements the covert authentication mechanism (Part II §8).
 //
 // The authentication is based on a shared PSK and uses HMAC-SHA256 over
-// observable record bytes. The auth tag is embedded in the first
-// application_data record after the TLS handshake.
+// the TLS ServerRandom and ClientRandom observed during the borrowed
+// handshake. The current protocol sends the auth tag as an H2 DATA frame
+// after the ChimneyRecord/H2 opening sequence.
 //
 //	K_auth = HKDF(PSK, label="chimney-auth", info = ServerRandom)
-//	tag = HMAC(K_auth, ServerRandom || <observable bytes of the record>)[:TAG_LEN]
+//	tag = HMAC(K_auth, ServerRandom || ClientRandom)[:TAG_LEN]
 //
 // Key properties:
 //   - ServerRandom is plaintext in TLS 1.3 ServerHello, so the relay can
@@ -76,11 +77,11 @@ func NewAuthenticatorFromHex(pskHex string, tagLen int) (*Authenticator, error) 
 	return NewAuthenticator(psk, tagLen)
 }
 
-// GenerateTag computes the authentication tag for the first application_data record.
+// GenerateTag computes an authentication tag.
 //
 // serverRandom: 32 bytes from ServerHello.random (observed during handshake forwarding).
-// recordBytes: the complete on-the-wire bytes of the first application_data record
-// (5-byte header + ciphertext). This is what the relay can observe.
+// recordBytes: generic second HMAC input. In the current protocol, callers pass
+// ClientRandom here; the name remains for compatibility with the older design.
 //
 // Returns the tag (tagLen bytes) and any error.
 func (a *Authenticator) GenerateTag(serverRandom, recordBytes []byte) ([]byte, error) {
@@ -130,7 +131,7 @@ func (a *Authenticator) TagLen() int {
 	return a.tagLen
 }
 
-// EmbedTagLocation describes where in the first application_data record
+// EmbedTagLocation describes the older design where the first application_data record
 // the auth tag should be embedded.
 //
 // The tag is embedded at a fixed offset within the encrypted payload.
@@ -146,17 +147,15 @@ type EmbedTagLocation struct {
 	TagLen int
 }
 
-// DefaultEmbedLocation is the default tag embedding location.
+// DefaultEmbedLocation is the default tag embedding location for the older
+// pre-H2-auth design.
 // The tag is placed at offset 0 within the first application_data record's
 // plaintext payload. This means the first bytes of the H2 frame stream
 // (after decryption) contain the auth tag.
 //
-// In practice, the client sends the first application_data record containing:
-//   - The auth tag at the beginning of the payload
-//   - H2 preface + SETTINGS following the tag
-//
-// The relay extracts the tag, verifies it, and if valid, processes the
-// remaining payload as the start of the H2 stream.
+// Current client/relay code sends [key_hint][auth_tag] as an H2 DATA frame
+// after the ChimneyRecord/H2 handshake, so this location helper is retained
+// only for tests and legacy helpers.
 var DefaultEmbedLocation = EmbedTagLocation{
 	PayloadOffset: 0,
 	TagLen:        DefaultTagLen,
@@ -336,12 +335,11 @@ func (e *ClientRandomExtractor) ExtractFromClientHello(data []byte) ([]byte, err
 	return clientRandom, nil
 }
 
-// RecordBytesCollector collects the observable bytes of the first application_data
-// record for auth tag computation/verification.
+// RecordBytesCollector collects observable bytes for the older first-record
+// auth-tag design.
 //
-// The "observable bytes" are the complete on-the-wire bytes of the record:
+// In the older design these bytes were the complete on-the-wire record:
 // the 5-byte header (type || version || length) followed by the ciphertext.
-// These are exactly the bytes the relay sees during TCP forwarding.
 type RecordBytesCollector struct {
 	buf []byte
 }

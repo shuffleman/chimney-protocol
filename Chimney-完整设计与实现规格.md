@@ -104,11 +104,15 @@ Client ──────── Relay ──────── 借用站_i（真
 ```
 阶段 1  Client 用 uTLS 发 ClientHello（SNI=站_i，指纹=站_i 对应真实浏览器）
 阶段 2  Relay 纯 TCP 转发握手给站_i，站_i 完成真实 TLS 握手
-阶段 3  握手后 Client 发第一段 application_data，内嵌 auth_tag
-阶段 4  Relay 验证 auth_tag：
-          通过 → 调包，进入 Chimney 模式（Part III）
+阶段 3  握手后 Client 切到底层 TCP 的 ChimneyRecord，发送 H2 preface + SETTINGS
+阶段 4  Relay 在首批 application_data 中扫描可用 K_sess 解开的 ChimneyRecord：
+          找不到 → 透传给站_i，零区分点
+          找到   → 进入 ChimneyRecord/H2 握手，但暂不切断站_i
+阶段 5  Client 用 H2 DATA frame 发送 [key_hint(4)][auth_tag]
+阶段 6  Relay 验证 auth_tag：
+          通过 → 调包，切断站_i，进入 Chimney 模式（Part III）
           失败 → 透传给站_i，零区分点
-阶段 5  Chimney 模式：H2 多路复用承载 tunnel，整形 + pacing
+阶段 7  Chimney 模式：H2 多路复用承载 tunnel，整形 + pacing
 ```
 
 ## 7. 真实入口：借第三方握手（为何无需密钥）
@@ -125,16 +129,19 @@ Client ──────── Relay ──────── 借用站_i（真
 PSK = 用户共享口令（带外配置）
 K_auth = HKDF(PSK, label="chimney-auth", info = ServerRandom)
 
-客户端在握手后第一段 application_data 的约定偏移嵌入：
-  tag = HMAC(K_auth, ServerRandom || <该 record 的可观测字节>)[:TAG_LEN]
+当前实现中，客户端先发送可由 `K_sess` 解开的 ChimneyRecord，完成 H2 开场序列后，在一个 H2 DATA frame payload 中发送：
+  [key_hint(4)] [auth_tag(TAG_LEN)]
 
-Relay：独立计算同一 tag（它有 ServerRandom + K_auth + 看得到那段字节）——无需解密
+当前实现的 tag 计算为：
+  tag = HMAC(K_auth, ServerRandom || ClientRandom)[:TAG_LEN]
+
+Relay：先用首批 application_data 中的 ChimneyRecord 验证自己人候选，再从 H2 DATA frame 中提取 key_hint 查表并独立计算同一 tag
   ├─ 命中 → 自己人（持有 PSK 的密码学证据）→ 调包
   └─ 未命中 / 非 tag → 真浏览器或探测者 → 透传
 ```
 
 - `ServerRandom` 在 TLS 1.3 的 ServerHello 中**明文**，Relay 转发时已观测 → 可独立计算，**无需 TLS 会话密钥**。
-- tag 是 HMAC 输出，对没有 PSK 的观察者与随机密文不可区分；只有持 PSK 才能预测它，且绑定 `ServerRandom` → **每会话唯一、抗重放**。
+- tag 是 HMAC 输出，对没有 PSK 的观察者与随机密文不可区分；只有持 PSK 才能预测它，且绑定 `ServerRandom` 与 `ClientRandom` → **每会话唯一、抗重放**。
 
 > 这是 P1（No distinguishable failure path）与抗主动探测的实现：判别依据是**外部不可获得的密码学证据**，而非任何可观测特征。
 
@@ -147,7 +154,7 @@ Relay：独立计算同一 tag（它有 ServerRandom + K_auth + 看得到那段�
   ```
   K_sess = HKDF(PSK, label="chimney-sess", info = ServerRandom || ClientRandom)
   ```
-- Relay 掐断到站_i 的后端连接，接管该连接，后续数据用 `K_sess` 的 AEAD 加密，封装成假 TLS application_data record（Part III §2.4）。
+- Relay 只有在 H2 DATA auth frame 验证通过后才掐断到站_i 的后端连接。验证通过前，站_i 后端保持连接，以便失败分支继续透明透传。后续数据用 `K_sess` 的 AEAD 加密，封装成假 TLS application_data record（Part III §2.4）。
 
 ## 10. 回源 B：同云收敛白名单
 
@@ -193,9 +200,11 @@ enforce 层（强制执法，B 的命根子）：
   ── 任一不过 → 按「真站对未知请求」处理（透传默认后端 / 或如真站拒绝）
 
 A、B 均过 → 纯 TCP 转发握手给站_i
-握手后看第一段 application_data：
-  ├─ auth_tag 命中 → 调包（Part III）
-  └─ 未命中（真浏览器/探测者）→ 继续透传给站_i
+握手后看第一批 application_data：
+  ├─ 找到可解密 ChimneyRecord → 完成 H2 开场，读取 H2 DATA auth frame
+  │    ├─ auth_tag 命中 → 调包（Part III）
+  │    └─ auth_tag 未命中 → 继续透传给站_i
+  └─ 找不到 ChimneyRecord（真浏览器/探测者）→ 继续透传给站_i
         → 探测者拿到真站_i 的真实响应，逐字节一致，零区分点
 ```
 
@@ -208,10 +217,13 @@ A、B 均过 → 纯 TCP 转发握手给站_i
 2. Relay ──[关卡 A/B 通过]── 纯 TCP 转发 ──▶ 站_i
        站_i ──真实 TLS 握手(真证书/真 ServerHello)──▶ Client
        ── 观察者：去站_i 的无可挑剔真实 HTTPS；RelayIP 在站_i 同云区段，IP 信誉自洽 ──
-3. Client ──握手后第一段 AppData，内嵌 auth_tag──▶ Relay
-4. Relay 验证 auth_tag：
+3. Client ──握手后第一批 AppData：ChimneyRecord(H2 preface + SETTINGS)──▶ Relay
+4. Relay 扫描 ChimneyRecord：
+   ├─ 找不到 → 透传站_i，零区分点
+   └─ 找到   → 完成 H2 SETTINGS/ACK 交换，暂不切断站_i
+5. Client ──H2 DATA: [key_hint(4)][auth_tag]──▶ Relay
+6. Relay 验证 auth_tag：
    ├─ 命中 → 【调包】掐断站_i 后端，用 K_sess 接管
-   │         · H2 前导 + SETTINGS（对齐站_i 真值）
    │         · tunnel 数据走 H2 DATA 帧
    │         · 前 ~10 帧整形，抹掉内层 TLS-in-TLS 指纹
    │         · 稳态按站_i 画像 pacing
@@ -247,7 +259,7 @@ struct ChimneyRecord {
 
 内部跑真 H2 状态机，免费获得：(1) 真实记录尺寸（preface/SETTINGS/HEADERS/DATA 是协议天然产生）；(2) 干净多路复用（tunnel/padding/可选真实内容各占一 stream）；(3) 自洽流控（WINDOW_UPDATE 节奏真实）。
 
-### 2.1 开场序列（调包瞬间立刻产生）
+### 2.1 开场序列（当前实现）
 
 ```
 方向   内容                                        典型明文大小
@@ -255,9 +267,12 @@ C→R   H2 preface(24B 固定) + SETTINGS              24 + (6×N+9)
 R→C   SETTINGS                                     6×M+9
 R→C   SETTINGS ACK                                 9
 C→R   SETTINGS ACK                                 9
+C→R   DATA(auth): [key_hint(4)][auth_tag]           9 + 4 + TAG_LEN
 C→R   HEADERS(首请求) ; R→C  HEADERS+DATA(响应)     变长
 ```
 preface = `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`（24 字节，内部真实生成）。
+
+当前代码在 auth DATA 验证通过后才真正关闭站_i 后端连接。因此 H2 开场发生在“候选 Chimney 模式”内，swap 完成点是 auth DATA 通过之后。
 
 ### 2.2 SETTINGS 取值来源（**必须抓站_i 真值，别用库默认**）
 
@@ -272,7 +287,7 @@ preface = `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`（24 字节，内部真实生成）
 | MAX_FRAME_SIZE | 0x5 | 默认 16384 |
 | MAX_HEADER_LIST_SIZE | 0x6 | **取站_i 真值** |
 
-抓取：`curl --http2 -v` / nghttp / pcap 解 SETTINGS 帧。**白名单每站存一份 SETTINGS 快照**，调包时按当前站_i 加载。
+抓取：`cmd/h2probe` / nghttp / pcap 解 SETTINGS 帧。**白名单每站存一份 SETTINGS 快照**，当前 relay 会在 `intent.yaml` 条目的 `settings_snapshot` 存在时按当前站_i 加载；缺失时退回内置默认值。
 
 ### 2.3 隐蔽数据 → DATA 帧 → record
 
@@ -329,6 +344,8 @@ tunnel 字节流 → H2 DATA 帧(隐蔽 stream_id，遵 MAX_FRAME_SIZE 与流控
 4. 与 SETTINGS 快照一起存进白名单条目
 ```
 
+当前实现状态：client CLI 和根包可以显式加载 `-profile` / `ProfilePath` JSON；relay 端的 `profile_dir` 字段尚未按站点加载 profile，启用 profiling 时使用 `profile.DefaultModel()`。
+
 ### 4.2 pacing 算法（稳态）
 
 ```
@@ -346,6 +363,8 @@ tunnel 不足用 padding stream 的 DATA 补足目标尺寸；过剩按窗口/MA
 
 > 注意：**不能在同一条调包后连接上请求站_i 真实资源**（调包已切断站_i 后端，对端是 Relay）。
 > 正确做法：**Relay 侧并联**一条到站_i 的真实连接，把站_i 真实响应经隐蔽 stream 喂回客户端，使内部 H2 流含货真价实的站_i 内容。代价：Relay 增加到站_i 出站（站_i 是预期目标，可接受）+ 延迟。作为可配增强项，不进核心路径。
+
+当前实现状态：已有的是“预录制内容块 dilution”。client/根包从 JSON 读取内容块，在 reserved dilution stream 上发送；relay 识别 reserved stream 后丢弃，以维持 record 形态。relay 并联真实站点实时取内容尚未实现。
 
 ## §5. 失败 / 探测分支记录级行为
 

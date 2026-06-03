@@ -257,29 +257,9 @@ func (c *streamConn) Read(p []byte) (int, error) {
 // Write writes data to the stream, prefixing with 0x02 DATA command.
 // If a traffic profile is configured, the record is padded to the target size.
 func (c *streamConn) Write(p []byte) (int, error) {
-	needed := 1 + len(p)
-
-	// Use pool for typical frame sizes; allocate directly for oversized writes.
-	var data []byte
-	var poolPtr *[]byte
-	if needed <= 65537 {
-		poolPtr = writeBufPool.Get().(*[]byte)
-		data = (*poolPtr)[:needed]
-	} else {
-		data = make([]byte, needed)
-	}
-
 	cmd := c.cmd
 	if cmd == 0 {
 		cmd = cmdTCP
-	}
-	data[0] = cmd
-	copy(data[1:], p)
-
-	// DataFrame copies the payload, so data is safe to return to pool after the write.
-	// Defer the Put so the buffer is reclaimed even if the write panics.
-	if poolPtr != nil {
-		defer writeBufPool.Put(poolPtr)
 	}
 
 	var targetSize uint16
@@ -291,17 +271,49 @@ func (c *streamConn) Write(p []byte) (int, error) {
 		}
 	}
 
-	var err error
-	if targetSize > 0 {
-		err = c.t.h2Eng.WritePaddedRecord(c.streamID, data, targetSize, false)
-	} else {
-		err = c.t.h2Eng.WriteData(c.streamID, data, false)
+	if cmd != cmdTCP {
+		if err := c.writeCommandFrame(cmd, p, targetSize); err != nil {
+			return 0, err
+		}
+		return len(p), nil
 	}
 
-	if err != nil {
-		return 0, err
+	for offset := 0; offset < len(p); {
+		chunkSize := len(p) - offset
+		if chunkSize > maxTunnelDataChunk {
+			chunkSize = maxTunnelDataChunk
+		}
+		if err := c.writeCommandFrame(cmd, p[offset:offset+chunkSize], targetSize); err != nil {
+			return offset, err
+		}
+		offset += chunkSize
 	}
 	return len(p), nil
+}
+
+func (c *streamConn) writeCommandFrame(cmd byte, payload []byte, targetSize uint16) error {
+	needed := 1 + len(payload)
+
+	// Use pool for typical frame sizes; allocate directly for oversized writes.
+	var data []byte
+	var poolPtr *[]byte
+	if needed <= 65537 {
+		poolPtr = writeBufPool.Get().(*[]byte)
+		data = (*poolPtr)[:needed]
+	} else {
+		data = make([]byte, needed)
+	}
+	if poolPtr != nil {
+		defer writeBufPool.Put(poolPtr)
+	}
+
+	data[0] = cmd
+	copy(data[1:], payload)
+
+	if targetSize > 0 {
+		return c.t.h2Eng.WritePaddedRecord(c.streamID, data, targetSize, false)
+	}
+	return c.t.h2Eng.WriteData(c.streamID, data, false)
 }
 
 // IsDead returns true when all tunnels' dispatch goroutines have exited,
@@ -382,6 +394,10 @@ const (
 	cmdTCP   = 0x02 // TCP data
 	cmdClose = 0x03 // Stream close
 	cmdUDP   = 0x04 // UDP datagram
+
+	// maxTunnelDataChunk leaves one byte for the Chimney tunnel command prefix
+	// so every TCP H2 DATA frame carries its own cmdTCP byte.
+	maxTunnelDataChunk = 16*1024 - 1
 )
 
 // udpStreamID is the single H2 stream used for all UDP traffic.

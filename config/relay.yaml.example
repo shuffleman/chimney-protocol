@@ -47,7 +47,8 @@ auth_read_timeout: 5s
 # Enable traffic profiling and pacing
 enable_profiling: true
 
-# Directory containing site profile files
+# Directory containing site profile files.
+# Note: current relay code does not load per-site profiles from this directory yet.
 profile_dir: "profiles"
 
 # CIDR refresh interval from cloud providers

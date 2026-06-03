@@ -44,12 +44,12 @@ build-client:
 # Run all tests
 test:
 	@echo "Running tests..."
-	$(GOTEST) -v -race ./internal/...
+	$(GOTEST) -v -race ./...
 
 # Run tests with coverage
 test-coverage:
 	@echo "Running tests with coverage..."
-	$(GOTEST) -v -race -coverprofile=$(BUILD_DIR)/coverage.out ./internal/...
+	$(GOTEST) -v -race -coverprofile=$(BUILD_DIR)/coverage.out ./...
 	$(GOCMD) tool cover -html=$(BUILD_DIR)/coverage.out -o $(BUILD_DIR)/coverage.html
 
 # Format all Go files

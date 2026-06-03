@@ -13,6 +13,7 @@
 //  7. Compute expected auth tag, compare with embedded tag
 //  8. If tag matches → swap: cut real site, take over with K_sess
 //  9. If tag doesn't match → continue forwarding to real site (zero distinction)
+//
 // 10. In Chimney mode: H2 framing, tunneling, profile pacing
 package relay
 
@@ -411,7 +412,6 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	// Step 7: Attempt swap. The auth tag is verified inside performSwap
 	// after extracting the key_hint from the auth frame.
-	s.stats.AuthenticatedSwaps.Add(1)
 	logger.Info("attempting swap")
 
 	if err := s.performSwap(clientConn, siteConn, sni, serverRandom, clientRandom, firstAppData, logger); err != nil {
@@ -897,6 +897,7 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 
 	// Auth verified — now it's safe to cut the real site connection.
 	siteConn.Close()
+	s.stats.AuthenticatedSwaps.Add(1)
 	logger.Info("swap complete, H2 tunnel established")
 
 	return s.handleTunnel(h2Eng, logger)
@@ -914,6 +915,10 @@ const maxPendingBytesPerStream = 256 * 1024
 // maxPendingStreams caps the number of streams waiting for a backend connection.
 // Beyond this limit, new CONNECT requests are refused with REFUSED_STREAM.
 const maxPendingStreams = 256
+
+// maxTunnelDataChunk leaves one byte for the Chimney tunnel command prefix so
+// every H2 DATA frame carries its own 0x02 DATA command after fragmentation.
+const maxTunnelDataChunk = 16*1024 - 1
 
 // tunnelConnPool manages backend connections for tunneled streams.
 type tunnelConnPool struct {
@@ -1304,7 +1309,44 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 			cmd := payload[0]
 			cmdData := payload[1:]
 
-			// UDP streams (0x04) — create/use a UDP socket, send datagram.
+			// If stream already has a TCP backend, dispatch via per-stream
+			// write channel before considering UDP commands. TCP payloads are
+			// command-prefixed by the client, but raw fallback data may begin
+			// with 0x04 and must not be parsed as UDP.
+			if _, err := pool.getOrCreate(fh.StreamID); err == nil {
+				if cmd == 0x03 {
+					logger.Debug("CLOSE stream", "stream_id", fh.StreamID)
+					pool.closeStream(fh.StreamID)
+				} else if cmd == 0x02 {
+					pool.writeToStream(fh.StreamID, cmdData)
+				} else {
+					pool.writeToStream(fh.StreamID, payload)
+				}
+				continue
+			}
+
+			// Existing UDP streams — send datagrams or close the UDP socket.
+			if ub, exists := udpBackends[fh.StreamID]; exists {
+				if cmd == 0x03 {
+					ub.close()
+					delete(udpBackends, fh.StreamID)
+					continue
+				}
+				if cmd != 0x04 {
+					continue
+				}
+				addr, data, err := parseUDPAddr(cmdData)
+				if err != nil {
+					logger.Debug("udp parse addr failed", "error", err)
+					continue
+				}
+				if _, err := ub.conn.WriteToUDP(data, addr); err != nil {
+					logger.Debug("udp sendto failed", "error", err)
+				}
+				continue
+			}
+
+			// New UDP streams (0x04) — create a UDP socket, send datagram.
 			if cmd == 0x04 {
 				ub, exists := udpBackends[fh.StreamID]
 				if !exists {
@@ -1327,15 +1369,6 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 				continue
 			}
 
-			// CLOSE for UDP streams.
-			if cmd == 0x03 {
-				if ub, exists := udpBackends[fh.StreamID]; exists {
-					ub.close()
-					delete(udpBackends, fh.StreamID)
-					continue
-				}
-			}
-
 			// Buffer data for streams whose CONNECT is still in progress.
 			// Reject streams that exceed the per-stream pending buffer limit
 			// to prevent OOM when connSem is saturated during heavy upload.
@@ -1345,20 +1378,6 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 					rstFrame := h2engine.RSTStreamFrame(fh.StreamID, h2engine.H2ErrEnhanceYourCalm)
 					h2Eng.WriteRawFrame(rstFrame)
 					pool.removePending(fh.StreamID)
-				}
-				continue
-			}
-
-			// If stream already has a backend, dispatch via per-stream write
-			// channel to avoid head-of-line blocking in the H2 frame loop.
-			if _, err := pool.getOrCreate(fh.StreamID); err == nil {
-				if cmd == 0x03 {
-					logger.Debug("CLOSE stream", "stream_id", fh.StreamID)
-					pool.closeStream(fh.StreamID)
-				} else if cmd == 0x02 {
-					pool.writeToStream(fh.StreamID, cmdData)
-				} else {
-					pool.writeToStream(fh.StreamID, payload)
 				}
 				continue
 			}
@@ -1419,13 +1438,20 @@ func (s *Server) readBackend(streamID uint32, backendConn net.Conn, h2Eng *h2eng
 	for {
 		n, err := backendConn.Read(buf)
 		if n > 0 {
-			response := make([]byte, 1+n)
-			response[0] = 0x02
-			copy(response[1:], buf[:n])
+			for offset := 0; offset < n; {
+				chunkSize := n - offset
+				if chunkSize > maxTunnelDataChunk {
+					chunkSize = maxTunnelDataChunk
+				}
+				response := make([]byte, 1+chunkSize)
+				response[0] = 0x02
+				copy(response[1:], buf[offset:offset+chunkSize])
 
-			if werr := h2Eng.WriteData(streamID, response, false); werr != nil {
-				logger.Debug("backend response write failed", "error", werr, "stream_id", streamID)
-				return
+				if werr := h2Eng.WriteData(streamID, response, false); werr != nil {
+					logger.Debug("backend response write failed", "error", werr, "stream_id", streamID)
+					return
+				}
+				offset += chunkSize
 			}
 		}
 		if err != nil {

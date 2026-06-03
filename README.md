@@ -69,16 +69,17 @@ Client                Relay                    Real Site (whitelist_i)
   |    observed by       |                             |
   |    relay)            |                             |
   |                      |                             |
-  |--- AppData (0x17) ->|                             |
+  |--- ChimneyRecord --->|                             |
+  |   H2 preface+SETTINGS|  Try decrypt with K_sess    |
+  |                      |  If no valid record:        |
+  |                      |  forward to real site       |
+  |                      |                             |
+  |<-- H2 SETTINGS ------|                             |
+  |--- H2 SETTINGS ACK ->|                             |
+  |--- H2 DATA(auth) --->|                             |
   |   [key_hint(4)]      |  Extract hint, lookup user  |
   |   [auth tag(N)]      |  Verify HMAC tag            |
-  |   [H2 preface]       |                             |
-  |                      |  Tag valid?                 |
-  |                      |  YES: CUT real site,        |
-  |                      |       take over with        |
-  |                      |       K_sess                 |
-  |                      |  NO:  forward to real site  |
-  |                      |       (zero distinction)     |
+  |                      |  Valid: CUT real site       |
   |                      |                             |
   |<==== H2 Tunnel =====>| (Chimney mode)              |
   |  DATA frames with    |                             |
@@ -92,10 +93,12 @@ Client                Relay                    Real Site (whitelist_i)
 2. Relay 提取 ClientHello 中的 SNI，检查白名单
 3. Relay 将 TLS 握手**透明转发**到真实站点（不解密）
 4. Relay 在转发过程中**观察** ServerHello 中的 ServerRandom（TLS 1.3 明文）
-5. TLS 握手完成后，Client 发送第一个 Application Data 记录，内含 `[key_hint(4)][auth_tag(N)]`
-6. Relay 提取 key_hint，O(1) 查找用户 → 派生 K_auth → 验证 HMAC 标签
-7. **调包 (Swap)**：认证成功 → Relay 切断真实站点连接，切换到 Chimney H2 隧道
-8. 认证失败 → Relay 继续透明转发到真实站点（零可区分性）
+5. TLS 握手完成后，Client 从底层 TCP 切到 ChimneyRecord，发送 H2 preface + SETTINGS
+6. Relay 在首批 Application Data 中扫描可解密的 ChimneyRecord；找不到则继续透明转发到真实站点
+7. H2 握手完成后，Client 在一个 DATA 帧里发送 `[key_hint(4)][auth_tag(N)]`
+8. Relay 提取 key_hint，O(1) 查找用户 → 验证 `HMAC(K_auth, ServerRandom || ClientRandom)`
+9. **调包 (Swap)**：认证成功 → Relay 切断真实站点连接，切换到 Chimney H2 隧道
+10. 认证失败 → Relay 继续透明转发到真实站点（零可区分性）
 
 ---
 
@@ -215,6 +218,8 @@ log_level: "info"
 metrics_addr: ":8080"
 ```
 
+`metrics_addr` 当前启动的是 JSON 管理 API，而不是 Prometheus 文本格式指标。已有端点包括 `/health`、`/admin/stats`、`/admin/users` 和 `/admin/refresh-cidrs`。
+
 ### 意图白名单 / Intent Whitelist (`config/intent.yaml`)
 
 ```yaml
@@ -259,13 +264,15 @@ Tag     = HMAC(K_auth, ServerRandom || ClientRandom)[:16]
 
 ### Auth Frame 格式 / Auth Frame Format
 
+当前实现中，Auth Frame 不是 TLS 握手后首个明文可见 application_data 的固定偏移内容，而是在 ChimneyRecord/H2 握手完成后发送的一个 H2 DATA frame payload。Relay 会先找到可解密的 ChimneyRecord，再读取该 DATA frame 做用户查表和 HMAC 验证。
+
 ```
 扩展格式（新）:
 ┌──────────────┬─────────────────────┐
 │ key_hint (4) │ auth_tag (tagLen)   │
 └──────────────┴─────────────────────┘
 
-旧格式（向后兼容，单用户）:
+旧格式（早期设计，当前 relay 路径不再消费）:
 ┌─────────────────────┐
 │ auth_tag (tagLen)   │
 └─────────────────────┘
@@ -286,7 +293,7 @@ store, _ := auth.NewUserStore(map[string]string{"default": psk}, 16)  // 单用�
 
 1. `ExtractKeyHint(payload)` — 提取前 4 字节
 2. `store.byHint[hint]` — O(1) 查找 `UserEntry`
-3. `entry.Deriver.VerifyAuthTag(...)` — 验证 HMAC
+3. `entry.Deriver.VerifyAuthTag(...)` — 验证 `HMAC(K_auth, ServerRandom || ClientRandom)`
 
 ### Client 侧 / Client Side
 
@@ -347,6 +354,10 @@ type Config struct {
     // ── 超时 / Timeouts ──
     ConnectTimeout   time.Duration  // TCP 连接超时（默认 10s）
     HandshakeTimeout time.Duration  // TLS+H2 握手超时（默认 10s）
+
+    // ── 连接池 / Pooling ──
+    PoolSize      int // 并行 H2 隧道数（默认 4）
+    TCPBufferSize int // 每条 TCP 隧道的读写缓冲区大小
 }
 ```
 
@@ -356,7 +367,7 @@ type Config struct {
 func NewDialer(config Config) (*Dialer, error)
 ```
 
-建立到 Relay 的完整 Chimney 隧道。内部自动完成：TCP 连接 → uTLS 握手 → AEAD 密钥派生 → H2 协商 → 认证。
+建立到 Relay 的完整 Chimney 隧道。内部自动完成：TCP 连接 → uTLS 握手 → ChimneyRecord 密钥派生 → H2 协商 → H2 DATA 认证。
 
 #### `DialContext`
 
@@ -366,7 +377,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 
 在已建立的隧道上打开新的 H2 虚拟流。返回的 `net.Conn` 是 `*streamConn` — 支持 `Read`、`Write`、`Close`、`SetDeadline` 等完整接口。
 
-多个 goroutine 可以并发调用 `DialContext`，每个调用打开独立的 H2 流，复用同一条 TLS 连接。
+多个 goroutine 可以并发调用 `DialContext`，每个调用打开独立的 H2 流。`Dialer` 默认维护 4 条并行 H2 隧道，按轮询方式分摊连接。
 
 #### `Close`
 
@@ -538,7 +549,7 @@ chimney/
 │   └── whitelist/               # 双层白名单
 ├── config/
 │   ├── relay.yaml.example       # Relay 配置模板
-│   ├── client.yaml.example      # Client 配置模板
+│   ├── client.yaml.example      # Client 配置模板（配置包支持；CLI 当前不读取 -config）
 │   ├── intent.yaml              # 意图白名单
 │   └── enforce.yaml             # 执行层 CIDR
 ├── go.mod
@@ -559,15 +570,17 @@ chimney/
 | TCP 中继 + 握手转发 / TCP relay + handshake | ✅ 完成 / Complete |
 | Swap 机制 / Swap mechanism | ✅ 完成 / Complete |
 | 白名单 (意图 + 执行) / Whitelist | ✅ 完成 / Complete |
-| 流量 Profile + 节奏控制 / Pacing | ✅ 完成 / Complete |
+| 流量 Profile + 节奏控制 / Pacing | ⚠️ 部分完成 / Partial |
 | Relay 服务器 / Relay server | ✅ 完成 / Complete |
 | Client (SOCKS5) / Client | ✅ 完成 / Complete |
 | 站点校准工具 / Calibration tool | ✅ 完成 / Complete |
 | uTLS 指纹轮换 / Fingerprint rotation | ✅ 完成 / Complete |
 | Padding 流 / Padding stream | ✅ 完成 / Complete |
-| Real content dilution | ✅ 完成 / Complete |
+| Real content dilution | ⚠️ 部分完成 / Partial |
 | **多用户 UUID 认证 / Multi-user auth** | ✅ 完成 / Complete |
 | **导出 Dialer API / Exportable Dialer** | ✅ 完成 / Complete |
+
+注：`Pacing` 当前在 relay 端使用默认 profile，在 client/根包侧可通过 `ProfilePath`/`-profile` 加载 JSON；`profile_dir` 尚未在 relay 端按站点加载。`Real content dilution` 当前是客户端/根包发送预录制内容块，relay 识别 reserved stream 后丢弃以保持流量形态，不是 relay 并联真实站点实时取内容。
 
 ---
 

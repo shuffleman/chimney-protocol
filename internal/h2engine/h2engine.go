@@ -101,7 +101,6 @@ const (
 	// whitelisted site, making traffic semantically indistinguishable from
 	// real browsing under deep packet inspection.
 	DilutionStreamID = 0x0FFFFFFD
-
 )
 
 var (
@@ -136,7 +135,7 @@ func DefaultSettings() *Settings {
 	enablePush := uint32(0) // Most servers disable push
 	maxConcurrentStreams := uint32(100)
 	initialWindowSize := uint32(65535) // Default per RFC 7540
-	maxFrameSize := uint32(16384) // Match Chrome/Firefox default (RFC 7540 default)
+	maxFrameSize := uint32(16384)      // Match Chrome/Firefox default (RFC 7540 default)
 	maxHeaderListSize := uint32(uint32(1<<31) - 1)
 
 	return &Settings{
@@ -146,7 +145,7 @@ func DefaultSettings() *Settings {
 		InitialWindowSize:    &initialWindowSize,
 		MaxFrameSize:         &maxFrameSize,
 		MaxHeaderListSize:    &maxHeaderListSize,
-		MaxFrameSizeActual:   4096,
+		MaxFrameSizeActual:   maxFrameSize,
 	}
 }
 
@@ -333,9 +332,9 @@ type Engine struct {
 
 // Stream represents an H2 stream within the tunnel.
 type Stream struct {
-	ID        uint32
-	State     StreamState
-	Window    int32 // Flow control window
+	ID         uint32
+	State      StreamState
+	Window     int32 // Flow control window
 	RecvWindow int32
 }
 
@@ -641,7 +640,6 @@ func (e *Engine) WriteCombinedRecord(frames ...[]byte) error {
 	}
 	return e.recordWriter.WriteRecord(combined)
 }
-
 
 // IsPaddingStream returns true if the stream ID is the reserved padding stream.
 // Used by the relay to filter out padding frames before dispatching.

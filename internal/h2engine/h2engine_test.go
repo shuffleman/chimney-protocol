@@ -34,6 +34,9 @@ func TestDefaultSettings(t *testing.T) {
 	if s.MaxFrameSize == nil {
 		t.Fatal("MaxFrameSize is nil")
 	}
+	if s.MaxFrameSizeActual != *s.MaxFrameSize {
+		t.Errorf("MaxFrameSizeActual = %d, want %d", s.MaxFrameSizeActual, *s.MaxFrameSize)
+	}
 	if s.MaxHeaderListSize == nil {
 		t.Fatal("MaxHeaderListSize is nil")
 	}
@@ -584,7 +587,7 @@ func TestWritePaddedRecord_WithPadding(t *testing.T) {
 	engine.SetRecordIO(nil, record.NewRecordWriter(pw, codec))
 
 	payload := []byte{0x02, 'h', 'i'} // 3 bytes
-	targetSize := uint16(128)          // Much larger than the tunnel frame
+	targetSize := uint16(128)         // Much larger than the tunnel frame
 
 	go func() {
 		err := engine.WritePaddedRecord(1, payload, targetSize, false)

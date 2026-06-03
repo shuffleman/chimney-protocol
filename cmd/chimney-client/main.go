@@ -23,13 +23,13 @@ import (
 	"sync"
 	"time"
 
+	utls "github.com/refraction-networking/utls"
 	"github.com/shuffleman/chimney-protocol/internal/auth"
 	"github.com/shuffleman/chimney-protocol/internal/dilution"
 	"github.com/shuffleman/chimney-protocol/internal/h2engine"
 	"github.com/shuffleman/chimney-protocol/internal/keyderiv"
 	"github.com/shuffleman/chimney-protocol/internal/profile"
 	"github.com/shuffleman/chimney-protocol/internal/record"
-	utls "github.com/refraction-networking/utls"
 )
 
 const (
@@ -38,6 +38,10 @@ const (
 
 	// DefaultHandshakeTimeout is the timeout for TLS handshake.
 	DefaultHandshakeTimeout = 10 * time.Second
+
+	// maxTunnelDataChunk leaves one byte for the Chimney tunnel command prefix
+	// so every H2 DATA frame carries its own 0x02 DATA command.
+	maxTunnelDataChunk = 16*1024 - 1
 )
 
 func main() {
@@ -114,13 +118,13 @@ func main() {
 	}
 
 	client := &Client{
-		RelayAddr:     *relayAddr,
-		SNI:           *sni,
-		DestAddr:      *destAddr,
-		PSKHex:        psk,
-		UserID:        uid,
-		TagLen:        *tagLen,
-		ListenAddr:    *listenAddr,
+		RelayAddr:        *relayAddr,
+		SNI:              *sni,
+		DestAddr:         *destAddr,
+		PSKHex:           psk,
+		UserID:           uid,
+		TagLen:           *tagLen,
+		ListenAddr:       *listenAddr,
 		Fingerprints:     fpRotator,
 		Profile:          trafficProfile,
 		PaddingTarget:    *paddingTarget,
@@ -136,13 +140,13 @@ func main() {
 
 // Client is the Chimney client.
 type Client struct {
-	RelayAddr     string
-	SNI           string
-	DestAddr      string
-	PSKHex        string
-	UserID        string
-	TagLen        int
-	ListenAddr    string
+	RelayAddr        string
+	SNI              string
+	DestAddr         string
+	PSKHex           string
+	UserID           string
+	TagLen           int
+	ListenAddr       string
 	Fingerprints     *FingerprintRotator
 	Profile          *profile.Model
 	PaddingTarget    int
@@ -182,6 +186,7 @@ func (c *Client) Run() error {
 //  7. Switch to ChimneyRecord layer (AEAD with K_sess)
 //  8. Send H2 preface + SETTINGS as ChimneyRecords
 //  9. Complete H2 handshake (SETTINGS + ACK exchange)
+//
 // 10. Send auth tag as first DATA frame on stream 1
 // 11. Relay verifies post-swap; tunnel is ready
 func (c *Client) establishTunnel() (net.Conn, error) {
@@ -702,10 +707,17 @@ type tunnelStream struct {
 	tc       *tunnelConn
 	streamID uint32
 	ch       chan *streamFrame
+	readBuf  []byte
 }
 
 // Read reads data from the stream, stripping the 0x02 DATA prefix.
 func (ts *tunnelStream) Read(p []byte) (int, error) {
+	if len(ts.readBuf) > 0 {
+		n := copy(p, ts.readBuf)
+		ts.readBuf = ts.readBuf[n:]
+		return n, nil
+	}
+
 	sf, ok := <-ts.ch
 	if !ok {
 		return 0, io.EOF
@@ -713,7 +725,11 @@ func (ts *tunnelStream) Read(p []byte) (int, error) {
 	if sf.fh.Type == h2engine.FrameData && len(sf.payload) > 0 {
 		switch sf.payload[0] {
 		case 0x02: // DATA
-			return copy(p, sf.payload[1:]), nil
+			n := copy(p, sf.payload[1:])
+			if n < len(sf.payload)-1 {
+				ts.readBuf = append(ts.readBuf[:0], sf.payload[1+n:]...)
+			}
+			return n, nil
 		case 0x03: // CLOSE
 			return 0, io.EOF
 		}
@@ -725,10 +741,6 @@ func (ts *tunnelStream) Read(p []byte) (int, error) {
 // If a traffic profile is configured, the record is padded to match
 // the target size distribution.
 func (ts *tunnelStream) Write(p []byte) (int, error) {
-	data := make([]byte, 1+len(p))
-	data[0] = 0x02
-	copy(data[1:], p)
-
 	var targetSize uint16
 	if ts.tc.profile != nil {
 		if ts.tc.paddingTarget > 0 {
@@ -738,14 +750,25 @@ func (ts *tunnelStream) Write(p []byte) (int, error) {
 		}
 	}
 
-	if targetSize > 0 {
-		if err := ts.tc.h2Engine.WritePaddedRecord(ts.streamID, data, targetSize, false); err != nil {
-			return 0, err
+	for offset := 0; offset < len(p); {
+		chunkSize := len(p) - offset
+		if chunkSize > maxTunnelDataChunk {
+			chunkSize = maxTunnelDataChunk
 		}
-	} else {
-		if err := ts.tc.h2Engine.WriteData(ts.streamID, data, false); err != nil {
-			return 0, err
+		data := make([]byte, 1+chunkSize)
+		data[0] = 0x02
+		copy(data[1:], p[offset:offset+chunkSize])
+
+		if targetSize > 0 {
+			if err := ts.tc.h2Engine.WritePaddedRecord(ts.streamID, data, targetSize, false); err != nil {
+				return offset, err
+			}
+		} else {
+			if err := ts.tc.h2Engine.WriteData(ts.streamID, data, false); err != nil {
+				return offset, err
+			}
 		}
+		offset += chunkSize
 	}
 	return len(p), nil
 }

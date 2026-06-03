@@ -21,6 +21,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -165,7 +166,7 @@ func main() {
 func probe(sni string, port int, timeout time.Duration) *ProbeResult {
 	r := &ProbeResult{SNI: sni, CapturedAt: time.Now()}
 
-	addr := fmt.Sprintf("%s:%d", sni, port)
+	addr := net.JoinHostPort(sni, strconv.Itoa(port))
 	rawConn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		r.Err = fmt.Errorf("connect: %w", err)
@@ -348,9 +349,9 @@ func printSetting(m map[string]uint32, key string, defaultVal uint32) {
 
 // IntentFile is the on-disk structure of intent.yaml.
 type IntentFile struct {
-	Version   int                      `yaml:"version"`
-	UpdatedAt string                   `yaml:"updated_at,omitempty"`
-	Entries   map[string]*IntentEntry  `yaml:"entries"`
+	Version   int                     `yaml:"version"`
+	UpdatedAt string                  `yaml:"updated_at,omitempty"`
+	Entries   map[string]*IntentEntry `yaml:"entries"`
 }
 
 // IntentEntry mirrors whitelist.IntentEntry for YAML round-trip.
