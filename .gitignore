@@ -19,6 +19,7 @@ coverage.out
 # IDE
 .idea/
 .vscode/
+.codegraph/
 *.swp
 *.swo
 *~
