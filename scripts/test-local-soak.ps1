@@ -9,6 +9,8 @@ param(
     [int]$Iterations = 10,
     [int]$IntervalSeconds = 2,
     [int]$StressTimeoutSeconds = 180,
+    [int64]$MaxClientPrivateMemoryGrowthBytes = 0,
+    [int64]$MaxRelayPrivateMemoryGrowthBytes = 0,
     [string]$ReportPath = "",
     [switch]$ReconnectHalfway
 )
@@ -138,6 +140,60 @@ function Run-StressJson([int]$Iteration) {
     return (Get-Content $stressPath -Raw | ConvertFrom-Json)
 }
 
+function Get-StateValue([object]$State, [string]$Field) {
+    if ($null -eq $State -or -not $State.alive) {
+        return $null
+    }
+    return [int64]$State.$Field
+}
+
+function Measure-SoakTrend([object[]]$Samples, [string]$ProcessName, [int]$ProcessIndex) {
+    if ($Samples.Count -eq 0) {
+        return [ordered]@{
+            name = $ProcessName
+            samples = 0
+        }
+    }
+
+    $first = $Samples[0].after[$ProcessIndex]
+    $last = $Samples[$Samples.Count - 1].after[$ProcessIndex]
+    $privateValues = @()
+    $workingSetValues = @()
+    foreach ($sample in $Samples) {
+        $state = $sample.after[$ProcessIndex]
+        if ($null -ne (Get-StateValue $state "private_memory_bytes")) {
+            $privateValues += [int64]$state.private_memory_bytes
+        }
+        if ($null -ne (Get-StateValue $state "working_set_bytes")) {
+            $workingSetValues += [int64]$state.working_set_bytes
+        }
+    }
+
+    $firstPrivate = Get-StateValue $first "private_memory_bytes"
+    $lastPrivate = Get-StateValue $last "private_memory_bytes"
+    $firstWorkingSet = Get-StateValue $first "working_set_bytes"
+    $lastWorkingSet = Get-StateValue $last "working_set_bytes"
+    $firstHandles = Get-StateValue $first "handle_count"
+    $lastHandles = Get-StateValue $last "handle_count"
+    $firstThreads = Get-StateValue $first "thread_count"
+    $lastThreads = Get-StateValue $last "thread_count"
+
+    return [ordered]@{
+        name = $ProcessName
+        samples = $Samples.Count
+        first_private_memory_bytes = $firstPrivate
+        last_private_memory_bytes = $lastPrivate
+        max_private_memory_bytes = if ($privateValues.Count -gt 0) { ($privateValues | Measure-Object -Maximum).Maximum } else { $null }
+        private_memory_growth_bytes = if ($null -ne $firstPrivate -and $null -ne $lastPrivate) { $lastPrivate - $firstPrivate } else { $null }
+        first_working_set_bytes = $firstWorkingSet
+        last_working_set_bytes = $lastWorkingSet
+        max_working_set_bytes = if ($workingSetValues.Count -gt 0) { ($workingSetValues | Measure-Object -Maximum).Maximum } else { $null }
+        working_set_growth_bytes = if ($null -ne $firstWorkingSet -and $null -ne $lastWorkingSet) { $lastWorkingSet - $firstWorkingSet } else { $null }
+        handle_growth = if ($null -ne $firstHandles -and $null -ne $lastHandles) { $lastHandles - $firstHandles } else { $null }
+        thread_growth = if ($null -ne $firstThreads -and $null -ne $lastThreads) { $lastThreads - $firstThreads } else { $null }
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $BinDir, $WorkDir | Out-Null
 
 if (Test-TcpPort $RelayAddr) {
@@ -227,6 +283,10 @@ try {
         }
     }
 
+    $sampleArray = @($samples.ToArray())
+    $clientTrend = Measure-SoakTrend $sampleArray "client" 0
+    $relayTrend = Measure-SoakTrend $sampleArray "relay" 1
+
     $report = [ordered]@{
         started_at_utc = $startTime.ToUniversalTime().ToString("o")
         finished_at_utc = (Get-Date).ToUniversalTime().ToString("o")
@@ -237,10 +297,24 @@ try {
         bytes_per_worker = $BytesPerWorker
         iterations = $Iterations
         reconnect_halfway = [bool]$ReconnectHalfway
+        summary = [ordered]@{
+            client = $clientTrend
+            relay = $relayTrend
+        }
         samples = $samples
     }
 
     $report | ConvertTo-Json -Depth 16 | Set-Content -Encoding UTF8 -Path $ReportPath
+    Write-Step ("client private memory growth: {0} bytes" -f $clientTrend.private_memory_growth_bytes)
+    Write-Step ("relay private memory growth: {0} bytes" -f $relayTrend.private_memory_growth_bytes)
+
+    if ($MaxClientPrivateMemoryGrowthBytes -gt 0 -and $clientTrend.private_memory_growth_bytes -gt $MaxClientPrivateMemoryGrowthBytes) {
+        throw "client private memory growth $($clientTrend.private_memory_growth_bytes) exceeded threshold $MaxClientPrivateMemoryGrowthBytes"
+    }
+    if ($MaxRelayPrivateMemoryGrowthBytes -gt 0 -and $relayTrend.private_memory_growth_bytes -gt $MaxRelayPrivateMemoryGrowthBytes) {
+        throw "relay private memory growth $($relayTrend.private_memory_growth_bytes) exceeded threshold $MaxRelayPrivateMemoryGrowthBytes"
+    }
+
     Write-Step "local soak test passed; report: $ReportPath"
 }
 catch {

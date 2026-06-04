@@ -999,6 +999,15 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-soak.ps1 `
 
 `test-local-soak.ps1` 会启动真实 relay/client 二进制，多轮运行 `socks_stress -json`，并在每轮前后采样 relay/client 进程的 working set、private memory、virtual memory、handle count 和 thread count。默认报告写入 `build/local-soak/soak-report.json`。用于追踪长时间上传/下载后 client 或 relay 内存是否持续爬升。
 
+报告的 `summary.client` 和 `summary.relay` 会给出 private memory、working set、handle、thread 的首尾值、最大值和增长量。需要把内存增长作为门禁时，可追加阈值参数：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-soak.ps1 `
+  -Iterations 30 `
+  -MaxClientPrivateMemoryGrowthBytes 67108864 `
+  -MaxRelayPrivateMemoryGrowthBytes 67108864
+```
+
 短 smoke 版本：
 
 ```powershell
