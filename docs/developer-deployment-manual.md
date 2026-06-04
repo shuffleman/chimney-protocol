@@ -1056,6 +1056,20 @@ curl.exe -L --socks5-hostname 127.0.0.1:1080 https://www.cloudflare.com/cdn-cgi/
 curl.exe -x socks5h://127.0.0.1:1080 -o NUL http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin
 ```
 
+远端公网下载 soak：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-remote-download-soak.ps1 `
+  -RelayAddr 103.135.147.226:8444 `
+  -SshHost 103.135.147.226 `
+  -SshPort 15042 `
+  -SocksAddr 127.0.0.1:18081 `
+  -Iterations 3 `
+  -URL http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin
+```
+
+该脚本会复用已有本地 SOCKS5 client；如果 `SocksAddr` 未监听，则自动构建并启动本地 `chimney-client`。每轮通过 `curl.exe` 经 SOCKS5 下载目标 URL，同时采样本地 client private memory 与远端 `chimney-relay.service` 的 `MemoryCurrent`。默认报告写入 `build/remote-download-soak/remote-download-soak-report.json`。
+
 ### 12.6 验收标准
 
 最低标准：
