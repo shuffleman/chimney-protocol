@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -55,6 +56,63 @@ func TestTunnelConnDeliverFrameWaitsForFullStreamChannel(t *testing.T) {
 	got := <-ch
 	if string(got.payload) != string([]byte{0x02, 'b'}) {
 		t.Fatalf("unexpected delivered payload: %v", got.payload)
+	}
+}
+
+func TestRelayBidirectionalClosesBothSidesWhenOneSideEnds(t *testing.T) {
+	clientConn, clientPeer := net.Pipe()
+	defer clientPeer.Close()
+	streamConn, streamPeer := net.Pipe()
+	defer streamPeer.Close()
+
+	done := make(chan struct{})
+	go func() {
+		relayBidirectional(clientConn, streamConn)
+		close(done)
+	}()
+
+	if err := clientPeer.Close(); err != nil {
+		t.Fatalf("close client peer: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("relayBidirectional did not return after one side closed")
+	}
+
+	if _, err := streamPeer.Write([]byte("x")); err == nil {
+		t.Fatal("stream side was not closed after relay returned")
+	}
+}
+
+func TestTunnelStreamReadReturnsWhenTunnelDies(t *testing.T) {
+	tc := &tunnelConn{
+		streams: map[uint32]chan *streamFrame{1: make(chan *streamFrame, 1)},
+		quit:    make(chan struct{}),
+		dead:    make(chan struct{}),
+	}
+	stream := &tunnelStream{
+		tc:       tc,
+		streamID: 1,
+		ch:       tc.streams[1],
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := stream.Read(make([]byte, 1))
+		done <- err
+	}()
+
+	tc.markDead(io.ErrClosedPipe)
+
+	select {
+	case err := <-done:
+		if err != io.EOF {
+			t.Fatalf("unexpected read error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream read did not return after tunnel died")
 	}
 }
 

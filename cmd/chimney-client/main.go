@@ -581,26 +581,38 @@ func (c *Client) handleSOCKS5Conn(clientConn net.Conn, manager *tunnelManager) {
 			return
 		}
 	}
-	defer stream.Close()
-
 	// Send SOCKS5 success reply
 	if err := c.socks5SendReply(clientConn, 0x00); err != nil {
+		stream.Close()
 		return
 	}
 
 	// Bidirectional relay between SOCKS5 client and tunnel stream
+	relayBidirectional(clientConn, stream)
+}
+
+func relayBidirectional(clientConn net.Conn, stream io.ReadWriteCloser) {
 	var wg sync.WaitGroup
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			stream.Close()
+			clientConn.Close()
+		})
+	}
+
 	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
-		defer clientConn.Close() // Unblock the other goroutine's Read
 		io.Copy(stream, clientConn)
+		closeBoth()
 	}()
 
 	go func() {
 		defer wg.Done()
 		io.Copy(clientConn, stream)
+		closeBoth()
 	}()
 
 	wg.Wait()
@@ -760,9 +772,6 @@ func (tc *tunnelConn) markDead(err error) {
 	if err != nil {
 		tc.lastErr = err
 	}
-	for _, ch := range tc.streams {
-		close(ch)
-	}
 	tc.streams = make(map[uint32]chan *streamFrame)
 	tc.mu.Unlock()
 
@@ -902,6 +911,10 @@ func (tc *tunnelConn) openStream(dest string) (*tunnelStream, error) {
 					return nil, fmt.Errorf("backend connect failed: code 0x%02x", sf.payload[0])
 				}
 			}
+		case <-tc.dead:
+			return nil, fmt.Errorf("tunnel closed")
+		case <-tc.quit:
+			return nil, fmt.Errorf("tunnel closed")
 		case <-timeout.C:
 			tc.mu.Lock()
 			delete(tc.streams, streamID)
@@ -924,13 +937,25 @@ func (ts *tunnelStream) Read(p []byte) (int, error) {
 	if len(ts.readBuf) > 0 {
 		n := copy(p, ts.readBuf)
 		ts.readBuf = ts.readBuf[n:]
+		if len(ts.readBuf) == 0 {
+			ts.readBuf = nil
+		}
 		return n, nil
 	}
 
-	sf, ok := <-ts.ch
-	if !ok {
+	var sf *streamFrame
+	select {
+	case got, ok := <-ts.ch:
+		if !ok {
+			return 0, io.EOF
+		}
+		sf = got
+	case <-ts.tc.dead:
+		return 0, io.EOF
+	case <-ts.tc.quit:
 		return 0, io.EOF
 	}
+
 	if sf.fh.Type == h2engine.FrameData && len(sf.payload) > 0 {
 		switch sf.payload[0] {
 		case 0x02: // DATA
@@ -988,5 +1013,12 @@ func (ts *tunnelStream) Close() error {
 	ts.tc.mu.Lock()
 	delete(ts.tc.streams, ts.streamID)
 	ts.tc.mu.Unlock()
-	return nil
+	ts.readBuf = nil
+	for {
+		select {
+		case <-ts.ch:
+		default:
+			return nil
+		}
+	}
 }

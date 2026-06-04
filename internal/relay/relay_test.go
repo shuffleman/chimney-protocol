@@ -105,3 +105,40 @@ func TestConnectACLAllowCIDRControlsDialTarget(t *testing.T) {
 		t.Fatal("expected target outside allow CIDR to be rejected")
 	}
 }
+
+func TestCloseStreamReleasesPoolResources(t *testing.T) {
+	dialSem := make(chan struct{}, 1)
+	connSem := make(chan struct{}, 1)
+	pool := newTunnelConnPool(nil, dialSem, connSem, nil)
+
+	clientConn, backendConn := net.Pipe()
+	defer clientConn.Close()
+
+	pool.addPending(1)
+	writeCh := pool.registerWriteCh(1)
+	pool.mu.Lock()
+	pool.streams[1] = backendConn
+	pool.mu.Unlock()
+
+	pool.closeStream(1)
+
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if len(pool.streams) != 0 {
+		t.Fatalf("streams not cleared: %d", len(pool.streams))
+	}
+	if len(pool.writeChs) != 0 {
+		t.Fatalf("writeChs not cleared: %d", len(pool.writeChs))
+	}
+	if len(pool.pending) != 0 {
+		t.Fatalf("pending not cleared: %d", len(pool.pending))
+	}
+	select {
+	case _, ok := <-writeCh:
+		if ok {
+			t.Fatal("write channel is still open")
+		}
+	default:
+		t.Fatal("write channel was not closed")
+	}
+}

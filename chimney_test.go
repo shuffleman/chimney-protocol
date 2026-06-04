@@ -3,10 +3,16 @@ package chimney
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/shuffleman/chimney-protocol/internal/dilution"
+	"github.com/shuffleman/chimney-protocol/internal/h2engine"
+	"github.com/shuffleman/chimney-protocol/internal/profile"
 )
 
 func TestParseFingerprint_Valid(t *testing.T) {
@@ -118,6 +124,148 @@ func TestStreamConnSetReadDeadlineWakesBlockedRead(t *testing.T) {
 	}
 }
 
+func TestStreamConnCloseWakesBlockedRead(t *testing.T) {
+	tun := &tunnel{
+		streams: make(map[uint32]chan *streamFrame),
+		quit:    make(chan struct{}),
+	}
+	ch := make(chan *streamFrame)
+	tun.streams[1] = ch
+	c := newStreamConn(tun, 1, ch, cmdTCP)
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := c.Read(make([]byte, 1))
+		errCh <- err
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("expected net.ErrClosed, got %T %v", err, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked Read was not woken by Close")
+	}
+	if _, ok := tun.streams[1]; ok {
+		t.Fatal("stream was not unregistered on Close")
+	}
+}
+
+func TestStreamConnCloseIsIdempotentAndWriteFailsAfterClose(t *testing.T) {
+	tun := &tunnel{
+		streams: make(map[uint32]chan *streamFrame),
+		quit:    make(chan struct{}),
+	}
+	ch := make(chan *streamFrame, 1)
+	tun.streams[1] = ch
+	c := newStreamConn(tun, 1, ch, cmdTCP)
+
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("expected net.ErrClosed after Close, got %T %v", err, err)
+	}
+}
+
+func TestEnsureTunnelReturnsReconnectErrorInsteadOfDeadTunnel(t *testing.T) {
+	dead := make(chan struct{})
+	close(dead)
+	d := &Dialer{
+		config: Config{
+			RelayAddr:      "127.0.0.1:1",
+			ConnectTimeout: 10 * time.Millisecond,
+		},
+		pool: []*tunnel{{
+			dead: dead,
+		}},
+	}
+
+	tun, err := d.ensureTunnel(0)
+	if err == nil {
+		t.Fatal("expected reconnect error")
+	}
+	if tun != nil {
+		t.Fatal("expected no tunnel when reconnect fails")
+	}
+	if !strings.Contains(err.Error(), "chimney: reconnect failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDialContextReturnsReconnectErrorInsteadOfUsingDeadTunnel(t *testing.T) {
+	dead := make(chan struct{})
+	close(dead)
+	d := &Dialer{
+		config: Config{
+			RelayAddr:      "127.0.0.1:1",
+			ConnectTimeout: 10 * time.Millisecond,
+		},
+		pool: []*tunnel{{
+			dead: dead,
+		}},
+	}
+
+	_, err := d.DialContext(context.Background(), "tcp", "example.com:443")
+	if err == nil {
+		t.Fatal("expected reconnect error")
+	}
+	if !strings.Contains(err.Error(), "chimney: reconnect failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDialContextAttemptsAllPoolSlotsBeforeReturningReconnectError(t *testing.T) {
+	deadA := make(chan struct{})
+	close(deadA)
+	deadB := make(chan struct{})
+	close(deadB)
+	attempts := 0
+	d := &Dialer{
+		pool: []*tunnel{
+			{dead: deadA},
+			{dead: deadB},
+		},
+		dialNew: func(Config, *profile.Model, *dilution.Provider) (*tunnel, error) {
+			attempts++
+			return nil, fmt.Errorf("dial attempt %d", attempts)
+		},
+	}
+
+	_, err := d.DialContext(context.Background(), "tcp", "example.com:443")
+	if err == nil {
+		t.Fatal("expected reconnect error")
+	}
+	if attempts != 2 {
+		t.Fatalf("DialContext attempted %d slots, want 2", attempts)
+	}
+	if !strings.Contains(err.Error(), "dial attempt 2") {
+		t.Fatalf("unexpected final error: %v", err)
+	}
+}
+
+func TestTunnelDialContextReturnsClosedForDeadTunnel(t *testing.T) {
+	dead := make(chan struct{})
+	close(dead)
+	tun := &tunnel{
+		dead: dead,
+	}
+
+	_, err := tun.dialContext(context.Background(), "example.com:443")
+	if !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("expected net.ErrClosed, got %T %v", err, err)
+	}
+}
+
 func TestStreamConnWriteDeadlineExpired(t *testing.T) {
 	c := &streamConn{
 		t:  &tunnel{quit: make(chan struct{})},
@@ -148,18 +296,63 @@ func TestListenPacketContextCanceled(t *testing.T) {
 	}
 }
 
-func TestListenPacketRejectsSecondPacketConn(t *testing.T) {
+func TestListenPacketAllowsMultiplePacketConns(t *testing.T) {
 	tun := &tunnel{
 		streams: make(map[uint32]chan *streamFrame),
 		quit:    make(chan struct{}),
+		dead:    make(chan struct{}),
+		h2Eng:   h2engine.NewEngine(h2engine.DefaultSettings(), nil),
 	}
 	d := &Dialer{pool: []*tunnel{tun}}
 
-	if _, err := d.ListenPacket(context.Background()); err != nil {
+	pc1, err := d.ListenPacket(context.Background())
+	if err != nil {
 		t.Fatalf("first ListenPacket failed: %v", err)
 	}
-	if _, err := d.ListenPacket(context.Background()); err == nil {
-		t.Fatal("expected second ListenPacket to fail")
+
+	pc2, err := d.ListenPacket(context.Background())
+	if err != nil {
+		t.Fatalf("second ListenPacket failed: %v", err)
+	}
+
+	if len(tun.streams) != 2 {
+		t.Fatalf("registered UDP streams = %d, want 2", len(tun.streams))
+	}
+	if pc1.(*udpConn).stream.streamID == pc2.(*udpConn).stream.streamID {
+		t.Fatal("multiple UDP packet conns reused the same stream ID")
+	}
+}
+
+func TestUDPConnCloseWakesBlockedReadFrom(t *testing.T) {
+	tun := &tunnel{
+		streams: make(map[uint32]chan *streamFrame),
+		quit:    make(chan struct{}),
+		dead:    make(chan struct{}),
+		h2Eng:   h2engine.NewEngine(h2engine.DefaultSettings(), nil),
+	}
+	d := &Dialer{pool: []*tunnel{tun}}
+	pc, err := d.ListenPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc.(*udpConn).stream.t.h2Eng = nil
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := pc.ReadFrom(make([]byte, 1))
+		errCh <- err
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	_ = pc.Close()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("expected net.ErrClosed, got %T %v", err, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked ReadFrom was not woken by Close")
 	}
 }
 

@@ -1559,6 +1559,7 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 						return
 					}
 					defer func() { <-pool.connSem }()
+					defer pool.closeStream(sid)
 					if err := h2Eng.WriteData(sid, []byte{0x01}, false); err != nil {
 						logger.Debug("failed to send CONNECT_OK", "error", err)
 					}

@@ -26,6 +26,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -219,7 +220,6 @@ type tunnel struct {
 	dead      chan struct{}
 	closed    bool
 	lastError error // set when dispatchFrames exits on read error
-	udpInUse  bool
 }
 
 // LastError returns the error that caused dispatchFrames to exit, if any.
@@ -251,6 +251,7 @@ type Dialer struct {
 
 	prof     *profile.Model
 	dilution *dilution.Provider
+	dialNew  func(Config, *profile.Model, *dilution.Provider) (*tunnel, error)
 }
 
 // Diagnostics returns diagnostic information from all tunnels in the pool.
@@ -292,12 +293,26 @@ type streamConn struct {
 	ch       chan *streamFrame
 	cmd      byte // cmdTCP for TCP streams, cmdUDP for UDP streams
 
+	readMu  sync.Mutex
 	readBuf []byte // leftover data from partial read of an H2 frame payload
+
+	closeOnce sync.Once
+	closed    chan struct{}
 
 	deadlineMu          sync.Mutex
 	readDeadline        time.Time
 	writeDeadline       time.Time
 	readDeadlineChanged chan struct{}
+}
+
+func newStreamConn(t *tunnel, streamID uint32, ch chan *streamFrame, cmd byte) *streamConn {
+	return &streamConn{
+		t:        t,
+		streamID: streamID,
+		ch:       ch,
+		cmd:      cmd,
+		closed:   make(chan struct{}),
+	}
 }
 
 // addr is a trivial net.Addr implementation.
@@ -311,11 +326,23 @@ func (a addr) String() string  { return a.str }
 // (e.g., crypto/tls reading a 5-byte TLS record header before the record body).
 func (c *streamConn) Read(p []byte) (int, error) {
 	for {
+		select {
+		case <-c.closed:
+			return 0, net.ErrClosed
+		default:
+		}
+
+		c.readMu.Lock()
 		if len(c.readBuf) > 0 {
 			n := copy(p, c.readBuf)
 			c.readBuf = c.readBuf[n:]
+			if len(c.readBuf) == 0 {
+				c.readBuf = nil
+			}
+			c.readMu.Unlock()
 			return n, nil
 		}
+		c.readMu.Unlock()
 
 		deadline, changed := c.readDeadlineState()
 		timer, expired := deadlineTimer(deadline)
@@ -335,7 +362,9 @@ func (c *streamConn) Read(p []byte) (int, error) {
 					data := sf.payload[1:]
 					n := copy(p, data)
 					if n < len(data) {
+						c.readMu.Lock()
 						c.readBuf = append(c.readBuf, data[n:]...)
+						c.readMu.Unlock()
 					}
 					return n, nil
 				case 0x03: // CLOSE
@@ -345,12 +374,17 @@ func (c *streamConn) Read(p []byte) (int, error) {
 					// The entire payload is raw data.
 					n := copy(p, sf.payload)
 					if n < len(sf.payload) {
+						c.readMu.Lock()
 						c.readBuf = append(c.readBuf, sf.payload[n:]...)
+						c.readMu.Unlock()
 					}
 					return n, nil
 				}
 			}
 			return 0, nil
+		case <-c.closed:
+			stopTimer(timer)
+			return 0, net.ErrClosed
 		case <-c.t.quit:
 			stopTimer(timer)
 			return 0, io.ErrClosedPipe
@@ -366,6 +400,12 @@ func (c *streamConn) Read(p []byte) (int, error) {
 // Write writes data to the stream, prefixing with 0x02 DATA command.
 // If a traffic profile is configured, the record is padded to the target size.
 func (c *streamConn) Write(p []byte) (int, error) {
+	select {
+	case <-c.closed:
+		return 0, net.ErrClosed
+	default:
+	}
+
 	cmd := c.cmd
 	if cmd == 0 {
 		cmd = cmdTCP
@@ -510,10 +550,25 @@ func (d *Dialer) LastError() error {
 
 // Close sends a CLOSE command and unregisters the stream.
 func (c *streamConn) Close() error {
-	c.t.h2Eng.WriteData(c.streamID, []byte{cmdClose}, false)
-	c.t.mu.Lock()
-	delete(c.t.streams, c.streamID)
-	c.t.mu.Unlock()
+	var err error
+	c.closeOnce.Do(func() {
+		close(c.closed)
+		if c.t != nil && c.t.h2Eng != nil {
+			err = c.t.h2Eng.WriteData(c.streamID, []byte{cmdClose}, false)
+		}
+		if c.t != nil {
+			c.t.mu.Lock()
+			delete(c.t.streams, c.streamID)
+			c.t.mu.Unlock()
+		}
+		c.readMu.Lock()
+		c.readBuf = nil
+		c.readMu.Unlock()
+	})
+	if err != nil {
+		return err
+	}
+
 	// Drain buffered frames so payloads can be GC'd immediately.
 	// The channel is not closed here — closing would race with
 	// dispatchFrames, which may have already fetched the channel
@@ -564,11 +619,11 @@ func (c *streamConn) signalReadDeadlineChangedLocked() {
 }
 
 // ---------------------------------------------------------------------------
-// UDP support — net.PacketConn over a single Chimney H2 stream.
+// UDP support — net.PacketConn over Chimney H2 streams.
 //
 // Like other stream-tunnel protocols (VLESS, Trojan, Shadowsocks), all UDP
-// datagrams are multiplexed over one H2 stream. H2 DATA frames provide
-// natural message boundaries so no length-prefix is needed.
+// datagrams for one PacketConn are multiplexed over one H2 stream. H2 DATA
+// frames provide natural message boundaries so no length-prefix is needed.
 // ---------------------------------------------------------------------------
 
 // Command byte prepended to H2 DATA frame payloads so the relay can
@@ -583,9 +638,6 @@ const (
 	maxTunnelDataChunk = 16*1024 - 1
 )
 
-// udpStreamID is the single H2 stream used for all UDP traffic.
-const udpStreamID = 0x40000001
-
 // UDP datagram wire format within a DATA frame payload:
 //
 //	[1B cmd=0x04][1B addrType][addr][2B port][payload]
@@ -599,10 +651,11 @@ type udpConn struct {
 	t      *tunnel
 	stream *streamConn
 
-	mu            sync.Mutex
-	readDeadline  time.Time
-	writeDeadline time.Time
-	closed        bool
+	mu                  sync.Mutex
+	readDeadline        time.Time
+	writeDeadline       time.Time
+	readDeadlineChanged chan struct{}
+	closed              bool
 }
 
 // Ensure udpConn satisfies net.PacketConn.
@@ -640,8 +693,12 @@ func (u *udpConn) ReadFrom(b []byte) (int, net.Addr, error) {
 			return n, addr, nil
 		case <-timeout:
 			return 0, nil, &net.OpError{Op: "read", Net: "udp", Err: &timeoutError{}}
+		case <-u.stream.closed:
+			return 0, nil, net.ErrClosed
 		case <-u.t.quit:
 			return 0, nil, io.ErrClosedPipe
+		case <-u.readDeadlineChangedChan():
+			continue
 		}
 	}
 }
@@ -748,16 +805,12 @@ func (u *udpConn) Close() error {
 	u.mu.Lock()
 	if u.closed {
 		u.mu.Unlock()
-		return net.ErrClosed
+		return nil
 	}
 	u.closed = true
 	u.mu.Unlock()
 
-	err := u.stream.Close()
-	u.t.mu.Lock()
-	u.t.udpInUse = false
-	u.t.mu.Unlock()
-	return err
+	return u.stream.Close()
 }
 
 func (u *udpConn) LocalAddr() net.Addr  { return addr{"chimney-udp", "client"} }
@@ -768,6 +821,7 @@ func (u *udpConn) SetDeadline(t time.Time) error {
 	defer u.mu.Unlock()
 	u.readDeadline = t
 	u.writeDeadline = t
+	u.signalReadDeadlineChangedLocked()
 	return nil
 }
 
@@ -775,6 +829,7 @@ func (u *udpConn) SetReadDeadline(t time.Time) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.readDeadline = t
+	u.signalReadDeadlineChangedLocked()
 	return nil
 }
 
@@ -783,6 +838,23 @@ func (u *udpConn) SetWriteDeadline(t time.Time) error {
 	defer u.mu.Unlock()
 	u.writeDeadline = t
 	return nil
+}
+
+func (u *udpConn) readDeadlineChangedChan() <-chan struct{} {
+	u.mu.Lock()
+	if u.readDeadlineChanged == nil {
+		u.readDeadlineChanged = make(chan struct{})
+	}
+	ch := u.readDeadlineChanged
+	u.mu.Unlock()
+	return ch
+}
+
+func (u *udpConn) signalReadDeadlineChangedLocked() {
+	if u.readDeadlineChanged != nil {
+		close(u.readDeadlineChanged)
+		u.readDeadlineChanged = make(chan struct{})
+	}
 }
 
 type timeoutError struct{}
@@ -808,28 +880,49 @@ func (d *Dialer) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 		d.mu.Unlock()
 		return nil, fmt.Errorf("chimney: no tunnels available; call DialContext first")
 	}
-	t := d.pool[0]
+	poolLen := len(d.pool)
 	d.mu.Unlock()
 
 	ch := make(chan *streamFrame, 256)
-	t.mu.Lock()
-	if t.udpInUse {
-		t.mu.Unlock()
-		return nil, fmt.Errorf("chimney: UDP packet connection already open")
+	start := int(d.next.Add(1) % uint32(poolLen))
+	var t *tunnel
+	var streamID uint32
+	var lastErr error
+	for attempt := 0; attempt < poolLen; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		idx := uint32((start + attempt) % poolLen)
+		candidate, err := d.ensureTunnel(idx)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		select {
+		case <-candidate.dead:
+			lastErr = net.ErrClosed
+			continue
+		default:
+		}
+		t = candidate
+		streamID = t.h2Eng.OpenStream()
+		break
 	}
-	t.udpInUse = true
-	t.streams[udpStreamID] = ch
+	if t == nil {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("chimney: no tunnels available")
+	}
+
+	t.mu.Lock()
+	t.streams[streamID] = ch
 	t.mu.Unlock()
 
 	return &udpConn{
-		d: d,
-		t: t,
-		stream: &streamConn{
-			t:        t,
-			streamID: udpStreamID,
-			ch:       ch,
-			cmd:      cmdUDP,
-		},
+		d:      d,
+		t:      t,
+		stream: newStreamConn(t, streamID, ch, cmdUDP),
 	}, nil
 }
 
@@ -1058,6 +1151,7 @@ func NewDialer(config Config) (*Dialer, error) {
 		pool:     pool,
 		prof:     prof,
 		dilution: dil,
+		dialNew:  newTunnel,
 	}, nil
 }
 
@@ -1065,33 +1159,40 @@ func NewDialer(config Config) (*Dialer, error) {
 // if the existing tunnel's dispatch goroutine has already exited. Only one
 // goroutine replaces a given slot at a time; concurrent callers block on d.mu
 // and then reuse the tunnel that was just created.
-func (d *Dialer) ensureTunnel(idx uint32) *tunnel {
+func (d *Dialer) ensureTunnel(idx uint32) (*tunnel, error) {
 	t := d.pool[idx]
 	select {
 	case <-t.dead:
 		// Tunnel is dead — attempt to replace it.
 	default:
-		return t // still alive
+		return t, nil // still alive
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	if d.closed {
+		return nil, net.ErrClosed
+	}
+
 	// Re-check under lock: another goroutine may have already replaced it.
 	select {
 	case <-d.pool[idx].dead:
 	default:
-		return d.pool[idx]
+		return d.pool[idx], nil
 	}
 
-	newT, err := newTunnel(d.config, d.prof, d.dilution)
+	dialNew := d.dialNew
+	if dialNew == nil {
+		dialNew = newTunnel
+	}
+	newT, err := dialNew(d.config, d.prof, d.dilution)
 	if err != nil {
-		// Reconnect failed; return the dead tunnel so dialContext returns an error.
-		return d.pool[idx]
+		return nil, fmt.Errorf("chimney: reconnect failed: %w", err)
 	}
 	d.pool[idx].closeTunnel()
 	d.pool[idx] = newT
-	return newT
+	return newT, nil
 }
 
 // DialContext opens a new H2 stream through the Chimney tunnel to addr.
@@ -1105,17 +1206,58 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 		d.mu.Unlock()
 		return nil, net.ErrClosed
 	}
+	poolLen := len(d.pool)
 	d.mu.Unlock()
 
-	// Round-robin across the connection pool, auto-reconnecting dead tunnels.
-	idx := d.next.Add(1) % uint32(len(d.pool))
-	t := d.ensureTunnel(idx)
+	if poolLen == 0 {
+		return nil, fmt.Errorf("chimney: no tunnels available")
+	}
 
-	return t.dialContext(ctx, addr)
+	// Round-robin across the connection pool, auto-reconnecting dead tunnels.
+	// If one slot cannot reconnect, try the remaining slots before surfacing
+	// the error to callers such as sing-box.
+	start := int(d.next.Add(1) % uint32(poolLen))
+	var lastErr error
+	for attempt := 0; attempt < poolLen; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		idx := uint32((start + attempt) % poolLen)
+		t, err := d.ensureTunnel(idx)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		conn, err := t.dialContext(ctx, addr)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		if !isTunnelUnavailable(err) {
+			return nil, err
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("chimney: no tunnels available")
+}
+
+func isTunnelUnavailable(err error) bool {
+	return errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe)
 }
 
 // dialContext opens a stream on a single tunnel.
 func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error) {
+	select {
+	case <-t.dead:
+		if err := t.LastError(); err != nil {
+			return nil, fmt.Errorf("chimney: tunnel closed: %w", err)
+		}
+		return nil, net.ErrClosed
+	default:
+	}
+
 	streamID := t.h2Eng.OpenStream()
 	ch := make(chan *streamFrame, 256)
 
@@ -1130,6 +1272,14 @@ func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error)
 		t.mu.Lock()
 		delete(t.streams, streamID)
 		t.mu.Unlock()
+		select {
+		case <-t.dead:
+			if lastErr := t.LastError(); lastErr != nil {
+				return nil, fmt.Errorf("chimney: tunnel closed: %w", lastErr)
+			}
+			return nil, net.ErrClosed
+		default:
+		}
 		return nil, fmt.Errorf("chimney: CONNECT: %w", err)
 	}
 
@@ -1152,12 +1302,7 @@ func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error)
 			if sf.fh.Type == h2engine.FrameData && len(sf.payload) > 0 {
 				switch sf.payload[0] {
 				case 0x01:
-					return &streamConn{
-						t:        t,
-						streamID: streamID,
-						ch:       ch,
-						cmd:      cmdTCP,
-					}, nil
+					return newStreamConn(t, streamID, ch, cmdTCP), nil
 				default:
 					t.mu.Lock()
 					delete(t.streams, streamID)
