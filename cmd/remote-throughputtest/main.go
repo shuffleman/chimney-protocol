@@ -1,10 +1,10 @@
-// cmd/remote-throughputtest — connects to an external Chimney relay for throughput testing.
+// cmd/remote-throughputtest — 连接到外部 Chimney 中继进行吞吐量测试。
 //
-// Unlike throughputtest which embeds relay+backend, this tool expects the relay
-// and backend to be already running on a remote server. The client connects to
-// the remote relay and all traffic avoids Windows loopback entirely.
+// 与内置中继+后端的 throughputtest 不同，此工具期望中继
+// 和后端已在远程服务器上运行。客户端连接到
+// 远程中继，所有流量完全避免 Windows 回环。
 //
-// Usage:
+// 用法：
 //
 //	remote-throughputtest -relay 103.135.147.226:8443 -dl 16 -ul 16 -duration 30s -pool 4
 package main
@@ -29,16 +29,16 @@ import (
 )
 
 var (
-	relayAddr  = flag.String("relay", "", "Remote relay address (host:port)")
-	dlWorkers  = flag.Int("dl", 8, "Download workers")
-	ulWorkers  = flag.Int("ul", 8, "Upload workers")
-	duration   = flag.Duration("duration", 30*time.Second, "Test duration")
-	poolSize   = flag.Int("pool", 4, "Chimney connection pool size")
-	bufSize    = flag.Int("buf", 128*1024, "Read/write buffer size (bytes)")
-	backend    = flag.String("backend", "127.0.0.1:19444", "Backend address (from relay's perspective)")
-	verbose    = flag.Bool("v", false, "Show per-worker errors")
-	sni        = flag.String("sni", "cloudflare.com", "SNI for TLS handshake")
-	userID     = flag.String("user-id", "throughput-test-00000000-0000-0000-0000-000000000001", "User ID for auth")
+	relayAddr        = flag.String("relay", "", "Remote relay address (host:port)")
+	dlWorkers        = flag.Int("dl", 8, "Download workers")
+	ulWorkers        = flag.Int("ul", 8, "Upload workers")
+	duration         = flag.Duration("duration", 30*time.Second, "Test duration")
+	poolSize         = flag.Int("pool", 4, "Chimney connection pool size")
+	bufSize          = flag.Int("buf", 128*1024, "Read/write buffer size (bytes)")
+	backend          = flag.String("backend", "127.0.0.1:19444", "Backend address (from relay's perspective)")
+	verbose          = flag.Bool("v", false, "Show per-worker errors")
+	sni              = flag.String("sni", "cloudflare.com", "SNI for TLS handshake")
+	userID           = flag.String("user-id", "throughput-test-00000000-0000-0000-0000-000000000001", "User ID for auth")
 	cmdDownload byte = 'D'
 	cmdUpload   byte = 'U'
 )
@@ -52,8 +52,8 @@ type counters struct {
 	ulConns  atomic.Int64
 }
 
-// encodeTrace is a lock-free ring buffer of recent encode (seq, sha256) records
-// for cross-referencing with relay-side AEAD failures.
+// encodeTrace 是一个无锁的近期 encode (seq, sha256) 记录环形缓冲区，
+// 用于与中继端 AEAD 失败进行交叉验证。
 type encodeTrace struct {
 	entries []encodeEntry
 	mask    int

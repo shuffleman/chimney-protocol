@@ -1,7 +1,7 @@
-// socks_stress drives mixed upload/download traffic through a SOCKS5 proxy.
+// socks_stress 通过 SOCKS5 代理驱动混合上传/下载流量。
 //
-// It starts a local TCP backend, then opens many SOCKS5 CONNECT streams to
-// that backend. Use it with real chimney-client and chimney-relay binaries.
+// 它启动一个本地 TCP 后端，然后打开许多 SOCKS5 CONNECT 流到
+// 该后端。配合真实的 chimney-client 和 chimney-relay 二进制文件使用。
 package main
 
 import (

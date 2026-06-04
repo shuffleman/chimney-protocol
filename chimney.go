@@ -1,8 +1,7 @@
-// Package chimney exports a Dialer that establishes connections through a
-// Chimney relay. It is designed to be imported by sing-box, Xray-core, or
-// any Go project that needs a net.Conn over the Chimney protocol.
+// Package chimney 导出一个 Dialer，用于通过 Chimney 中继建立连接。
+// 它设计供 sing-box、Xray-core 或任何需要基于 Chimney 协议获得 net.Conn 的 Go 项目导入。
 //
-// Usage:
+// 用法：
 //
 //	d, err := chimney.NewDialer(chimney.Config{
 //	    RelayAddr:  "relay.example.com:443",
@@ -14,12 +13,11 @@
 //	defer d.Close()
 //
 //	conn, err := d.DialContext(ctx, "tcp", "api.example.com:443")
-//	// conn is a net.Conn — use like any TCP connection.
+//	// conn 是一个 net.Conn — 可像任何 TCP 连接一样使用。
 //
-// The Dialer maintains a pool of H2 connections to the relay. Each connection
-// has its own TCP socket and frame-dispatch goroutine, so higher PoolSize
-// values increase throughput for high-concurrency workloads. PoolSize defaults
-// to 4; set to 1 for single-connection mode (lower resource usage).
+// Dialer 维护到中继的 H2 连接池。每个连接拥有独立的 TCP socket 和帧调度 goroutine，
+// 因此较高的 PoolSize 值可提高高并发工作负载的吞吐量。PoolSize 默认为 4；
+// 设置为 1 进入单连接模式（资源占用更低）。
 package chimney
 
 import (
@@ -51,76 +49,74 @@ import (
 )
 
 const (
-	// DefaultConnectTimeout is the default timeout for establishing the tunnel.
+	// DefaultConnectTimeout 是建立隧道的默认超时时间。
 	DefaultConnectTimeout = 10 * time.Second
 
-	// DefaultHandshakeTimeout is the default timeout for TLS + H2 handshake.
+	// DefaultHandshakeTimeout 是 TLS + H2 握手的默认超时时间。
 	DefaultHandshakeTimeout = 10 * time.Second
 
-	// DefaultPoolSize is the default number of parallel H2 connections.
+	// DefaultPoolSize 是默认的并行 H2 连接数。
 	DefaultPoolSize = 4
 
-	// DefaultTCPBufferSize is the default TCP read/write buffer size per tunnel.
+	// DefaultTCPBufferSize 是每个隧道默认的 TCP 读写缓冲区大小。
 	DefaultTCPBufferSize = 256 * 1024
 )
 
-// Config holds all parameters for establishing a Chimney tunnel.
-// RelayAddr, SNI, and either PSK or UserID are required; all other fields have
-// defaults. Config is safe to embed in downstream project configuration structs.
+// Config 保存建立 Chimney 隧道的所有参数。
+// RelayAddr、SNI 以及 PSK 或 UserID 为必填项；所有其他字段均有默认值。
+// Config 可安全嵌入下游项目的配置结构体中。
 type Config struct {
-	// RelayAddr is the relay server address (host:port). Required.
+	// RelayAddr 是中继服务器地址（host:port）。必填项。
 	RelayAddr string `yaml:"relay_addr" json:"relay_addr"`
 
-	// SNI is the TLS Server Name Indication — must be a whitelisted site. Required.
+	// SNI 是 TLS 服务器名称指示（Server Name Indication）——必须是白名单站点。必填项。
 	SNI string `yaml:"sni" json:"sni"`
 
-	// PSK is the pre-shared key (64 hex chars = 256 bits). Optional when UserID
-	// is set; in that mode PSK is derived as SHA256(UserID).
+	// PSK 是预共享密钥（64 个十六进制字符 = 256 位）。当设置了 UserID 时为可选；
+	// 在该模式下 PSK 通过 SHA256(UserID) 派生。
 	PSK string `yaml:"psk,omitempty" json:"psk,omitempty"`
 
-	// UserID is the user identifier (e.g. UUID) for multi-user relay deployments.
-	// It is hashed to a 4-byte key hint sent alongside the auth tag.
-	// If empty, defaults to "default" (single-user mode).
+	// UserID 是多用户中继部署中的用户标识符（例如 UUID）。
+	// 它被哈希为一个 4 字节的密钥提示，随认证标签一起发送。
+	// 如果为空，默认为 "default"（单用户模式）。
 	UserID string `yaml:"user_id,omitempty" json:"user_id,omitempty"`
 
-	// TagLen is the auth tag length in bytes (default: 16).
+	// TagLen 是认证标签长度（字节）（默认：16）。
 	TagLen int `yaml:"tag_len,omitempty" json:"tag_len,omitempty"`
 
-	// Fingerprint is the uTLS ClientHello fingerprint name (default: "chrome").
-	// Available: chrome, firefox, safari, ios, edge, android, 360, qq,
-	// randomized, golang — with optional -version (e.g. "chrome-120").
+	// Fingerprint 是 uTLS ClientHello 指纹名称（默认："chrome"）。
+	// 可用选项：chrome, firefox, safari, ios, edge, android, 360, qq,
+	// randomized, golang — 可附加版本号（例如 "chrome-120"）。
 	Fingerprint string `yaml:"fingerprint,omitempty" json:"fingerprint,omitempty"`
 
-	// ProfilePath is an optional traffic profile JSON for padding.
-	// Empty string disables padding.
+	// ProfilePath 是可选的用于填充的流量配置文件 JSON。
+	// 空字符串表示禁用填充。
 	ProfilePath string `yaml:"profile_path,omitempty" json:"profile_path,omitempty"`
 
-	// PaddingTarget overrides the padding record size. 0 = use profile distribution.
+	// PaddingTarget 覆盖填充记录大小。0 表示使用配置文件分布。
 	PaddingTarget int `yaml:"padding_target,omitempty" json:"padding_target,omitempty"`
 
-	// DilutionPath is an optional content blocks JSON for the dilution stream.
-	// Empty string disables dilution.
+	// DilutionPath 是可选的用于稀释流的内容块 JSON。
+	// 空字符串表示禁用稀释。
 	DilutionPath string `yaml:"dilution_path,omitempty" json:"dilution_path,omitempty"`
 
-	// ConnectTimeout is the TCP connect timeout (default: 10s).
+	// ConnectTimeout 是 TCP 连接超时时间（默认：10 秒）。
 	ConnectTimeout time.Duration `yaml:"connect_timeout,omitempty" json:"connect_timeout,omitempty"`
 
-	// HandshakeTimeout is the TLS + H2 handshake timeout (default: 10s).
+	// HandshakeTimeout 是 TLS + H2 握手超时时间（默认：10 秒）。
 	HandshakeTimeout time.Duration `yaml:"handshake_timeout,omitempty" json:"handshake_timeout,omitempty"`
 
-	// PoolSize is the number of parallel H2 connections to the relay (default: 4).
-	// Higher values increase throughput under high concurrency by parallelising
-	// frame dispatch across multiple TCP sockets. Set to 1 for single-connection
-	// mode (lowest resource usage, sufficient for low concurrency).
+	// PoolSize 是到中继的并行 H2 连接数（默认：4）。
+	// 较高的值通过在多个 TCP socket 间并行分发帧来提高高并发下的吞吐量。
+	// 设置为 1 进入单连接模式（资源占用最低，适用于低并发场景）。
 	PoolSize int `yaml:"pool_size,omitempty" json:"pool_size,omitempty"`
 
-	// TCPBufferSize sets the TCP read/write buffer size in bytes for each tunnel
-	// connection (default: 262144 = 256 KiB). On memory-constrained platforms
-	// like iOS, reduce to 65536 to save ~384 KiB per tunnel.
+	// TCPBufferSize 设置每个隧道连接的 TCP 读写缓冲区大小（字节）（默认：262144 = 256 KiB）。
+	// 在 iOS 等内存受限的平台上，可减少到 65536 以每个隧道节省约 384 KiB 内存。
 	TCPBufferSize int `yaml:"tcp_buffer_size,omitempty" json:"tcp_buffer_size,omitempty"`
 }
 
-// DefaultConfig returns a Config populated with library defaults.
+// DefaultConfig 返回一个填充了库默认值的 Config。
 func DefaultConfig() Config {
 	return Config{
 		TagLen:           auth.DefaultTagLen,
@@ -132,9 +128,8 @@ func DefaultConfig() Config {
 	}
 }
 
-// ConfigFromYAML parses a Chimney client-library config from YAML, applies
-// defaults, and validates it. It is intended for downstream projects that want
-// to embed Chimney as a transport without importing internal packages.
+// ConfigFromYAML 从 YAML 解析 Chimney 客户端库配置，应用默认值并验证。
+// 适用于希望将 Chimney 作为传输层嵌入而无需导入内部包的下游项目。
 func ConfigFromYAML(data []byte) (Config, error) {
 	config := DefaultConfig()
 	if err := yaml.Unmarshal(data, &config); err != nil {
@@ -146,7 +141,7 @@ func ConfigFromYAML(data []byte) (Config, error) {
 	return config, nil
 }
 
-// LoadConfigFile loads a Chimney client-library config from a YAML file.
+// LoadConfigFile 从 YAML 文件加载 Chimney 客户端库配置。
 func LoadConfigFile(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -155,8 +150,8 @@ func LoadConfigFile(path string) (Config, error) {
 	return ConfigFromYAML(data)
 }
 
-// Normalize applies defaults, derives PSK from UserID when needed, and validates
-// the config. It is useful when downstream projects construct Config manually.
+// Normalize 应用默认值，在需要时从 UserID 派生 PSK，并验证配置。
+// 当下游项目手动构造 Config 时此方法很有用。
 func (c *Config) Normalize() error {
 	if c.TagLen == 0 {
 		c.TagLen = auth.DefaultTagLen
@@ -204,8 +199,8 @@ func (c *Config) Normalize() error {
 	return nil
 }
 
-// tunnel is a single H2 connection to the relay. The Dialer maintains a pool
-// of these to parallelise frame dispatch under high concurrency.
+// tunnel 是到中继的单个 H2 连接。Dialer 维护一个由这些 tunnel 组成的连接池，
+// 以在高并发下并行分发帧。
 type tunnel struct {
 	rawConn   net.Conn
 	h2Eng     *h2engine.Engine
@@ -220,29 +215,28 @@ type tunnel struct {
 	quit      chan struct{}
 	dead      chan struct{}
 	closed    bool
-	lastError error // set when dispatchFrames exits on read error
+	lastError error // 当 dispatchFrames 因读取错误退出时设置
 }
 
-// LastError returns the error that caused dispatchFrames to exit, if any.
+// LastError 返回导致 dispatchFrames 退出的错误（如有）。
 func (t *tunnel) LastError() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.lastError
 }
 
-// CodecTrails returns the sealer and opener trails from the H2 engine's record codec.
+// CodecTrails 返回 H2 引擎记录编解码器的密封器和开启器踪迹。
 func (t *tunnel) CodecTrails() (sealerTrail, openerTrail string) {
 	return t.h2Eng.CodecTrails()
 }
 
-// CodecSeqs returns the current sealer and opener sequence numbers.
+// CodecSeqs 返回当前的密封器和开启器序列号。
 func (t *tunnel) CodecSeqs() (sealerSeq, openerSeq uint64) {
 	return t.h2Eng.CodecSeqs()
 }
 
-// A Dialer maintains a pool of H2 connections to a Chimney relay.
-// Multiple goroutines may invoke DialContext concurrently; calls are
-// distributed across the pool connections round-robin.
+// Dialer 维护到 Chimney 中继的 H2 连接池。
+// 多个 goroutine 可同时调用 DialContext；调用会在连接池中轮询分配。
 type Dialer struct {
 	config Config
 	pool   []*tunnel
@@ -255,7 +249,7 @@ type Dialer struct {
 	dialNew  func(Config, *profile.Model, *dilution.Provider) (*tunnel, error)
 }
 
-// Diagnostics returns diagnostic information from all tunnels in the pool.
+// Diagnostics 返回连接池中所有隧道的诊断信息。
 func (d *Dialer) Diagnostics() string {
 	var b strings.Builder
 	for i, t := range d.pool {
@@ -272,14 +266,14 @@ func (d *Dialer) Diagnostics() string {
 	return b.String()
 }
 
-// streamFrame is a frame received for a specific H2 stream.
+// streamFrame 是为特定 H2 流接收的帧。
 type streamFrame struct {
 	fh      *h2engine.FrameHeader
 	payload []byte
 }
 
-// writeBufPool reuses Write buffers up to DefaultMaxFrameSize+1 bytes.
-// Larger buffers fall through to heap allocation.
+// writeBufPool 复用最大为 DefaultMaxFrameSize+1 字节的写入缓冲区。
+// 更大的缓冲区将回退到堆分配。
 var writeBufPool = sync.Pool{
 	New: func() any {
 		buf := make([]byte, 65536+1)
@@ -287,15 +281,15 @@ var writeBufPool = sync.Pool{
 	},
 }
 
-// streamConn wraps a single H2 stream as a net.Conn.
+// streamConn 将单个 H2 流封装为 net.Conn。
 type streamConn struct {
 	t        *tunnel
 	streamID uint32
 	ch       chan *streamFrame
-	cmd      byte // cmdTCP for TCP streams, cmdUDP for UDP streams
+	cmd      byte // TCP 流使用 cmdTCP，UDP 流使用 cmdUDP
 
 	readMu  sync.Mutex
-	readBuf []byte // leftover data from partial read of an H2 frame payload
+	readBuf []byte // H2 帧载荷部分读取后的剩余数据
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -316,15 +310,15 @@ func newStreamConn(t *tunnel, streamID uint32, ch chan *streamFrame, cmd byte) *
 	}
 }
 
-// addr is a trivial net.Addr implementation.
+// addr 是一个简单的 net.Addr 实现。
 type addr struct{ network, str string }
 
 func (a addr) Network() string { return a.network }
 func (a addr) String() string  { return a.str }
 
-// Read reads data from the stream, stripping the 0x02 DATA prefix.
-// Uses an internal readBuf to prevent data loss when callers read in small chunks
-// (e.g., crypto/tls reading a 5-byte TLS record header before the record body).
+// Read 从流中读取数据，去除 0x02 DATA 前缀。
+// 使用内部 readBuf 防止调用者以小块读取时发生数据丢失
+// （例如 crypto/tls 在读取记录体之前先读取 5 字节的 TLS 记录头部）。
 func (c *streamConn) Read(p []byte) (int, error) {
 	for {
 		select {
@@ -359,7 +353,7 @@ func (c *streamConn) Read(p []byte) (int, error) {
 			}
 			if sf.fh.Type == h2engine.FrameData && len(sf.payload) > 0 {
 				switch sf.payload[0] {
-				case 0x02: // DATA with chimney prefix
+				case 0x02: // 带 chimney 前缀的 DATA
 					data := sf.payload[1:]
 					n := copy(p, data)
 					if n < len(data) {
@@ -368,11 +362,11 @@ func (c *streamConn) Read(p []byte) (int, error) {
 						c.readMu.Unlock()
 					}
 					return n, nil
-				case 0x03: // CLOSE
+				case 0x03: // 关闭
 					return 0, io.EOF
 				default:
-					// No chimney prefix — continuation of a fragmented write.
-					// The entire payload is raw data.
+					// 无 chimney 前缀 — 分片写入的续段。
+					// 整个载荷为原始数据。
 					n := copy(p, sf.payload)
 					if n < len(sf.payload) {
 						c.readMu.Lock()
@@ -398,8 +392,8 @@ func (c *streamConn) Read(p []byte) (int, error) {
 	}
 }
 
-// Write writes data to the stream, prefixing with 0x02 DATA command.
-// If a traffic profile is configured, the record is padded to the target size.
+// Write 将数据写入流，前缀添加 0x02 DATA 命令。
+// 如果配置了流量配置文件，记录将被填充到目标大小。
 func (c *streamConn) Write(p []byte) (int, error) {
 	select {
 	case <-c.closed:
@@ -448,7 +442,7 @@ func (c *streamConn) writeCommandFrame(cmd byte, payload []byte, targetSize uint
 
 	needed := 1 + len(payload)
 
-	// Use pool for typical frame sizes; allocate directly for oversized writes.
+	// 对典型帧大小使用池；超大写入直接分配。
 	var data []byte
 	var poolPtr *[]byte
 	if needed <= 65537 {
@@ -525,8 +519,8 @@ func (c *streamConn) prepareWriteDeadline() bool {
 	return false
 }
 
-// IsDead returns true when all tunnels' dispatch goroutines have exited,
-// indicating the underlying connections are dead and a new dialer is needed.
+// IsDead 在所有隧道的调度 goroutine 都已退出时返回 true，
+// 表明底层连接已死，需要新的拨号器。
 func (d *Dialer) IsDead() bool {
 	for _, t := range d.pool {
 		select {
@@ -538,8 +532,8 @@ func (d *Dialer) IsDead() bool {
 	return true
 }
 
-// LastError returns the last dispatch error from any tunnel, or nil.
-// Useful for diagnosing why the dialer died.
+// LastError 返回任何隧道的最后一次调度错误，如果没有则返回 nil。
+// 用于诊断拨号器死亡的原因。
 func (d *Dialer) LastError() error {
 	for _, t := range d.pool {
 		if err := t.LastError(); err != nil {
@@ -549,7 +543,7 @@ func (d *Dialer) LastError() error {
 	return nil
 }
 
-// Close sends a CLOSE command and unregisters the stream.
+// Close 发送 CLOSE 命令并取消注册流。
 func (c *streamConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
@@ -570,12 +564,11 @@ func (c *streamConn) Close() error {
 		return err
 	}
 
-	// Drain buffered frames so payloads can be GC'd immediately.
-	// The channel is not closed here — closing would race with
-	// dispatchFrames, which may have already fetched the channel
-	// reference. The channel is GC'd when this streamConn goes out
-	// of scope, and any remaining buffered frames at tunnel shutdown
-	// are cleaned up by closeTunnel.
+	// 排空缓冲帧，以便载荷可被立即 GC。
+	// 此处不关闭通道 — 关闭会与 dispatchFrames 产生竞态，
+	// 后者可能已经获取了通道引用。
+	// 当此 streamConn 离开作用域时通道会被 GC，
+	// 隧道关闭时任何剩余的缓冲帧由 closeTunnel 清理。
 	for {
 		select {
 		case <-c.ch:
@@ -620,33 +613,32 @@ func (c *streamConn) signalReadDeadlineChangedLocked() {
 }
 
 // ---------------------------------------------------------------------------
-// UDP support — net.PacketConn over Chimney H2 streams.
+// UDP 支持 — 基于 Chimney H2 流的 net.PacketConn。
 //
-// Like other stream-tunnel protocols (VLESS, Trojan, Shadowsocks), all UDP
-// datagrams for one PacketConn are multiplexed over one H2 stream. H2 DATA
-// frames provide natural message boundaries so no length-prefix is needed.
+// 与其他流隧道协议（VLESS、Trojan、Shadowsocks）类似，一个 PacketConn
+// 的所有 UDP 数据报通过单个 H2 流复用。H2 DATA 帧提供天然的报文边界，
+// 因此无需长度前缀。
 // ---------------------------------------------------------------------------
 
-// Command byte prepended to H2 DATA frame payloads so the relay can
-// distinguish TCP streams from UDP streams.
+// 命令字节前缀到 H2 DATA 帧载荷，供中继区分 TCP 流和 UDP 流。
 const (
-	cmdTCP   = 0x02 // TCP data
-	cmdClose = 0x03 // Stream close
-	cmdUDP   = 0x04 // UDP datagram
+	cmdTCP   = 0x02 // TCP 数据
+	cmdClose = 0x03 // 流关闭
+	cmdUDP   = 0x04 // UDP 数据报
 
-	// maxTunnelDataChunk leaves one byte for the Chimney tunnel command prefix
-	// so every TCP H2 DATA frame carries its own cmdTCP byte.
+	// maxTunnelDataChunk 为 Chimney 隧道命令前缀留出一个字节，
+	// 以便每个 TCP H2 DATA 帧携带其自身的 cmdTCP 字节。
 	maxTunnelDataChunk = 16*1024 - 1
 )
 
-// UDP datagram wire format within a DATA frame payload:
+// UDP 数据报在 DATA 帧载荷中的线格式：
 //
 //	[1B cmd=0x04][1B addrType][addr][2B port][payload]
 //
-// addrType: 0x01 = IPv4 (4B), 0x03 = Domain (1B len + N bytes), 0x04 = IPv6 (16B)
+// addrType: 0x01 = IPv4 (4B), 0x03 = 域名 (1B 长度 + N 字节), 0x04 = IPv6 (16B)
 
-// udpConn implements net.PacketConn over a single Chimney H2 stream.
-// All datagrams share one stream; H2 DATA frame boundaries delimit messages.
+// udpConn 在单个 Chimney H2 流上实现 net.PacketConn。
+// 所有数据报共享一个流；H2 DATA 帧边界界定报文。
 type udpConn struct {
 	d      *Dialer
 	t      *tunnel
@@ -659,10 +651,10 @@ type udpConn struct {
 	closed              bool
 }
 
-// Ensure udpConn satisfies net.PacketConn.
+// 确保 udpConn 满足 net.PacketConn。
 var _ net.PacketConn = (*udpConn)(nil)
 
-// ReadFrom reads a UDP datagram, returning the payload and source address.
+// ReadFrom 读取一个 UDP 数据报，返回载荷和源地址。
 func (u *udpConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	for {
 		u.mu.Lock()
@@ -704,7 +696,7 @@ func (u *udpConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	}
 }
 
-// parseDatagram extracts a UDP datagram from a DATA frame payload.
+// parseDatagram 从 DATA 帧载荷中提取 UDP 数据报。
 func parseDatagram(payload []byte, b []byte) (int, net.Addr, error) {
 	if len(payload) < 4 || payload[0] != cmdUDP {
 		return 0, nil, fmt.Errorf("chimney: invalid UDP frame")
@@ -722,7 +714,7 @@ func parseDatagram(payload []byte, b []byte) (int, net.Addr, error) {
 		data = payload[8:]
 		n := copy(b, data)
 		return n, &net.UDPAddr{IP: net.ParseIP(host), Port: port}, nil
-	case 0x03: // Domain
+	case 0x03: // 域名
 		if len(payload) < 5 {
 			return 0, nil, fmt.Errorf("chimney: truncated domain UDP frame")
 		}
@@ -750,8 +742,8 @@ func parseDatagram(payload []byte, b []byte) (int, net.Addr, error) {
 	}
 }
 
-// encodeDatagram builds the wire format for a UDP datagram (without command byte;
-// streamConn.Write prepends the correct cmd based on the stream type).
+// encodeDatagram 构建 UDP 数据报的线格式（不含命令字节；
+// streamConn.Write 根据流类型前缀添加正确的 cmd）。
 func encodeDatagram(addr net.Addr, b []byte) []byte {
 	host, port, ok := udpAddrParts(addr)
 	if !ok {
@@ -759,7 +751,7 @@ func encodeDatagram(addr net.Addr, b []byte) []byte {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		if len(host) == 0 || len(host) > 255 {
+		if len(host) == 0 || len(host) > 255 || port < 0 || port > 65535 {
 			return nil
 		}
 		buf := make([]byte, 1+1+len(host)+2+len(b))
@@ -814,7 +806,7 @@ func udpAddrParts(addr net.Addr) (host string, port int, ok bool) {
 	return host, int(port64), true
 }
 
-// WriteTo sends a UDP datagram to the given address.
+// WriteTo 向指定地址发送一个 UDP 数据报。
 func (u *udpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	u.mu.Lock()
 	if u.closed {
@@ -835,7 +827,7 @@ func (u *udpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	return len(b), nil
 }
 
-// Close closes the UDP stream.
+// Close 关闭 UDP 流。
 func (u *udpConn) Close() error {
 	u.mu.Lock()
 	if u.closed {
@@ -898,9 +890,8 @@ func (e *timeoutError) Error() string   { return "i/o timeout" }
 func (e *timeoutError) Timeout() bool   { return true }
 func (e *timeoutError) Temporary() bool { return true }
 
-// ListenPacket opens a UDP packet connection over the Chimney tunnel.
-// A single H2 stream carries all UDP datagrams; H2 DATA frame boundaries
-// provide natural message delimiting.
+// ListenPacket 通过 Chimney 隧道打开一个 UDP 数据包连接。
+// 单个 H2 流承载所有 UDP 数据报；H2 DATA 帧边界提供天然的报文分隔。
 func (d *Dialer) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -961,9 +952,9 @@ func (d *Dialer) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	}, nil
 }
 
-// newTunnel establishes a single H2-tunneled connection to the relay.
+// newTunnel 建立到中继的单个 H2 隧道连接。
 func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tunnel, error) {
-	// Step 1: TCP connect
+	// 步骤 1：TCP 连接
 	rawConn, err := net.DialTimeout("tcp", config.RelayAddr, config.ConnectTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("chimney: connect to relay: %w", err)
@@ -983,7 +974,7 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 		return nil, fmt.Errorf("chimney: set handshake deadline: %w", err)
 	}
 
-	// Step 2: uTLS handshake
+	// 步骤 2：uTLS 握手
 	fpID, err := parseFingerprint(config.Fingerprint)
 	if err != nil {
 		rawConn.Close()
@@ -1011,7 +1002,7 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 		return nil, fmt.Errorf("chimney: invalid random length")
 	}
 
-	// Step 3: Key derivation
+	// 步骤 3：密钥派生
 	deriver, err := keyderiv.NewDeriverFromHex(config.PSK)
 	if err != nil {
 		uConn.Close()
@@ -1059,16 +1050,16 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 		}
 	}
 
-	// Step 4: Extract raw TCP connection for the record layer.
-	// After the swap the Chimney record codec operates directly on the
-	// TCP stream — TLS is no longer in the picture.
+	// 步骤 4：提取原始 TCP 连接用于记录层。
+	// 交换后，Chimney 记录编解码器直接在 TCP 流上操作 —
+	// TLS 不再参与其中。
 	rawTCPConn := uConn.GetUnderlyingConn()
 
-	// Step 5: Record layer
+	// 步骤 5：记录层
 	recReader := record.NewRecordReader(rawTCPConn, codec)
 	recWriter := record.NewRecordWriter(rawTCPConn, codec)
 
-	// Step 6: Send H2 preface + SETTINGS
+	// 步骤 6：发送 H2 前言 + SETTINGS
 	settings := h2engine.DefaultSettings()
 	h2Opening := h2engine.GenerateClientOpeningSequence(settings)
 	if err := recWriter.WriteRecord(h2Opening); err != nil {
@@ -1076,11 +1067,11 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 		return nil, fmt.Errorf("chimney: send H2 preface: %w", err)
 	}
 
-	// Step 7: Create H2 engine
+	// 步骤 7：创建 H2 引擎
 	h2Eng := h2engine.NewEngine(settings, codec)
 	h2Eng.SetRecordIO(recReader, recWriter)
 
-	// Step 8: Complete H2 handshake
+	// 步骤 8：完成 H2 握手
 	fh, _, err := h2Eng.ReadFrame()
 	if err != nil {
 		uConn.Close()
@@ -1107,7 +1098,7 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 		return nil, fmt.Errorf("chimney: expected SETTINGS ACK, got type 0x%x flags 0x%x", fh.Type, fh.Flags)
 	}
 
-	// Step 9: Send auth tag
+	// 步骤 9：发送认证标签
 	authStreamID := h2Eng.OpenStream()
 	authPayload := make([]byte, 4+len(tag))
 	copy(authPayload, keyHint[:])
@@ -1143,8 +1134,8 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 	return t, nil
 }
 
-// NewDialer connects to a Chimney relay, establishes PoolSize TLS+H2 tunnels,
-// and returns a Dialer ready to open streams via DialContext.
+// NewDialer 连接到 Chimney 中继，建立 PoolSize 个 TLS+H2 隧道，
+// 并返回一个可通过 DialContext 打开流的 Dialer。
 func NewDialer(config Config) (*Dialer, error) {
 	if err := config.Normalize(); err != nil {
 		return nil, err
@@ -1172,7 +1163,7 @@ func NewDialer(config Config) (*Dialer, error) {
 	for i := 0; i < config.PoolSize; i++ {
 		t, err := newTunnel(config, prof, dil)
 		if err != nil {
-			// Close already-created tunnels on partial failure.
+			// 部分失败时关闭已创建的隧道。
 			for j := 0; j < i; j++ {
 				pool[j].closeTunnel()
 			}
@@ -1190,17 +1181,16 @@ func NewDialer(config Config) (*Dialer, error) {
 	}, nil
 }
 
-// ensureTunnel returns the tunnel at pool[idx], replacing it with a fresh one
-// if the existing tunnel's dispatch goroutine has already exited. Only one
-// goroutine replaces a given slot at a time; concurrent callers block on d.mu
-// and then reuse the tunnel that was just created.
+// ensureTunnel 返回 pool[idx] 处的隧道，如果现有隧道的调度 goroutine
+// 已退出则替换为新隧道。每次只有一个 goroutine 替换指定槽位；
+// 并发调用者阻塞在 d.mu 上，然后复用刚创建的隧道。
 func (d *Dialer) ensureTunnel(idx uint32) (*tunnel, error) {
 	t := d.pool[idx]
 	select {
 	case <-t.dead:
-		// Tunnel is dead — attempt to replace it.
+	// 隧道已死 — 尝试替换。
 	default:
-		return t, nil // still alive
+		return t, nil // 仍然存活
 	}
 
 	d.mu.Lock()
@@ -1210,7 +1200,7 @@ func (d *Dialer) ensureTunnel(idx uint32) (*tunnel, error) {
 		return nil, net.ErrClosed
 	}
 
-	// Re-check under lock: another goroutine may have already replaced it.
+	// 在锁下重新检查：另一个 goroutine 可能已经替换了它。
 	select {
 	case <-d.pool[idx].dead:
 	default:
@@ -1230,11 +1220,11 @@ func (d *Dialer) ensureTunnel(idx uint32) (*tunnel, error) {
 	return newT, nil
 }
 
-// DialContext opens a new H2 stream through the Chimney tunnel to addr.
-// The returned net.Conn is a virtual connection multiplexed over H2.
-// Streams are distributed across the connection pool round-robin.
+// DialContext 通过 Chimney 隧道打开一个新的 H2 流到目标地址。
+// 返回的 net.Conn 是一个通过 H2 复用的虚拟连接。
+// 流在连接池中轮询分配。
 //
-// network is ignored (always TCP). addr must be "host:port".
+// network 参数被忽略（始终为 TCP）。addr 必须是 "host:port" 格式。
 func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	d.mu.Lock()
 	if d.closed {
@@ -1248,9 +1238,8 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 		return nil, fmt.Errorf("chimney: no tunnels available")
 	}
 
-	// Round-robin across the connection pool, auto-reconnecting dead tunnels.
-	// If one slot cannot reconnect, try the remaining slots before surfacing
-	// the error to callers such as sing-box.
+	// 在连接池中轮询分配，自动重连已死的隧道。
+	// 如果一个槽位无法重连，尝试剩余槽位后再将错误返回给调用者（如 sing-box）。
 	start := int(d.next.Add(1) % uint32(poolLen))
 	var lastErr error
 	for attempt := 0; attempt < poolLen; attempt++ {
@@ -1282,7 +1271,7 @@ func isTunnelUnavailable(err error) bool {
 	return errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe)
 }
 
-// dialContext opens a stream on a single tunnel.
+// dialContext 在单个隧道上打开一个流。
 func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error) {
 	select {
 	case <-t.dead:
@@ -1349,7 +1338,7 @@ func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error)
 	}
 }
 
-// Close shuts down all tunnels in the pool.
+// Close 关闭连接池中的所有隧道。
 func (d *Dialer) Close() error {
 	d.mu.Lock()
 	if d.closed {
@@ -1381,18 +1370,16 @@ func (t *tunnel) closeTunnel() error {
 	return err
 }
 
-// dispatchFrames reads frames from the H2 engine and routes them to per-stream channels.
-// tunnelIdleTimeout is the maximum duration with no frames received before
-// the tunnel is considered dead and torn down. This prevents dispatchFrames
-// from blocking forever on a stuck Windows TCP loopback connection.
+// dispatchFrames 从 H2 引擎读取帧并将其路由到每个流的通道。
+// tunnelIdleTimeout 是在未收到任何帧的情况下，隧道被认为已死并拆除前的最大持续时间。
+// 这防止 dispatchFrames 在卡住的 Windows TCP 回环连接上永远阻塞。
 const tunnelIdleTimeout = 30 * time.Second
 
 func (t *tunnel) dispatchFrames() {
 	defer close(t.dead)
 
-	// Rolling read deadline: extended after every successful ReadFrame so
-	// active tunnels never time out; stuck connections are detected within
-	// tunnelIdleTimeout seconds.
+	// 滚动读取截止时间：每次成功 ReadFrame 后延长，
+	// 使活动隧道永不过期；卡住的连接在 tunnelIdleTimeout 秒内被检测到。
 	t.rawConn.SetReadDeadline(time.Now().Add(tunnelIdleTimeout))
 
 	for {
@@ -1422,20 +1409,20 @@ func (t *tunnel) dispatchFrames() {
 			t.mu.Unlock()
 			return
 		}
-		// Extend deadline on every successful frame receipt.
+		// 每次成功接收帧后延长截止时间。
 		t.rawConn.SetReadDeadline(time.Now().Add(tunnelIdleTimeout))
 
 		t.mu.Lock()
 		ch, ok := t.streams[fh.StreamID]
 		t.mu.Unlock()
 		if ok {
-			// Fast path: channel has space — no timer allocation.
+			// 快速路径：通道有空间 — 无需分配定时器。
 			select {
 			case ch <- &streamFrame{fh, payload}:
 			default:
-				// Slow path: channel is full. Wait with a timeout — a consumer
-				// stuck for tunnelIdleTimeout starves the TCP receive buffer and
-				// deadlocks the tunnel, so tear it down if necessary.
+				// 慢速路径：通道已满。带超时等待 — 消费者
+				// 在 tunnelIdleTimeout 内卡住会导致 TCP 接收缓冲区饥饿
+				// 并使隧道死锁，因此必要时拆除它。
 				select {
 				case ch <- &streamFrame{fh, payload}:
 				case <-t.quit:
@@ -1454,7 +1441,7 @@ func (t *tunnel) dispatchFrames() {
 	}
 }
 
-// dilutionLoop periodically sends dilution records with real HTTP content.
+// dilutionLoop 定期发送带有真实 HTTP 内容的稀释记录。
 func (t *tunnel) dilutionLoop() {
 	interval := t.prof.RecordDelay()
 	if interval <= 0 {
@@ -1485,7 +1472,7 @@ func (t *tunnel) dilutionLoop() {
 	}
 }
 
-// parseFingerprint maps a name string to a uTLS ClientHelloID.
+// parseFingerprint 将名称字符串映射到 uTLS ClientHelloID。
 func parseFingerprint(name string) (utls.ClientHelloID, error) {
 	normalized := strings.ToLower(name)
 
@@ -1568,7 +1555,7 @@ func parseFingerprint(name string) (utls.ClientHelloID, error) {
 	case "android":
 		return utls.HelloAndroid_11_OkHttp, nil
 
-	// Chinese browsers
+	// 中国浏览器
 	case "360":
 		return utls.Hello360_Auto, nil
 	case "360-7":
@@ -1598,76 +1585,76 @@ func parseFingerprint(name string) (utls.ClientHelloID, error) {
 	}
 }
 
-// Ensure streamConn satisfies net.Conn at compile time.
+// 确保 streamConn 在编译时满足 net.Conn。
 var _ net.Conn = (*streamConn)(nil)
 
-// Ensure crypto/tls is importable (utls.Config shadows it, but is never used directly).
+// 确保 crypto/tls 可导入（utls.Config 遮蔽了它，但从未直接使用）。
 var _ = tls.VersionTLS12
 
-// RelayConfig holds the configuration for a Chimney relay server.
-// This is the public API for creating a relay server from external packages.
+// RelayConfig 保存 Chimney 中继服务器的配置。
+// 这是从外部包创建中继服务器的公共 API。
 type RelayConfig struct {
-	// ListenAddr is the address to listen on (e.g. ":443").
+	// ListenAddr 是监听的地址（例如 ":443"）。
 	ListenAddr string
 
-	// PSK is the pre-shared key (hex-encoded) for single-user mode.
+	// PSK 是单用户模式的预共享密钥（十六进制编码）。
 	PSK string
 
-	// Users maps user identifiers to their hex-encoded PSKs for multi-user mode.
+	// Users 将用户标识符映射到其十六进制编码的 PSK，用于多用户模式。
 	Users map[string]string
 
-	// UserIDs is a list of user identifiers for multi-user mode.
-	// Each user's PSK is derived as PSK = SHA256(userID).
+	// UserIDs 是多用户模式的用户标识符列表。
+	// 每个用户的 PSK 通过 PSK = SHA256(userID) 派生。
 	UserIDs []string
 
-	// TagLen is the authentication tag length in bytes.
+	// TagLen 是认证标签长度（字节）。
 	TagLen int
 
-	// IntentFile is the path to the intent whitelist file.
-	// Ignored if IntentYAML is non-empty.
+	// IntentFile 是意图白名单文件的路径。
+	// 如果 IntentYAML 非空则忽略。
 	IntentFile string
 
-	// EnforceFile is the path to the enforce CIDR file.
-	// Ignored if EnforceYAML is non-empty.
+	// EnforceFile 是强制 CIDR 文件的路径。
+	// 如果 EnforceYAML 非空则忽略。
 	EnforceFile string
 
-	// IntentYAML is the inline intent whitelist YAML content.
-	// When non-empty, takes precedence over IntentFile.
+	// IntentYAML 是内联的意图白名单 YAML 内容。
+	// 非空时优先于 IntentFile。
 	IntentYAML string
 
-	// EnforceYAML is the inline enforce CIDR YAML content.
-	// When non-empty, takes precedence over EnforceFile.
+	// EnforceYAML 是内联的强制 CIDR YAML 内容。
+	// 非空时优先于 EnforceFile。
 	EnforceYAML string
 
-	// CloudRegion is the cloud region for CIDR validation.
+	// CloudRegion 是用于 CIDR 验证的云区域。
 	CloudRegion string
 
-	// DefaultBackend is the fallback backend for non-authenticated traffic.
+	// DefaultBackend 是未认证流量的后备后端。
 	DefaultBackend string
 
-	// HandshakeTimeout for TLS handshake relay.
+	// HandshakeTimeout TLS 握手超时时间。
 	HandshakeTimeout time.Duration
 
-	// AuthReadTimeout for reading the auth record.
+	// AuthReadTimeout 读取认证记录的超时时间。
 	AuthReadTimeout time.Duration
 
-	// EnableProfiling enables traffic profiling and pacing.
+	// EnableProfiling 启用流量分析和速率控制。
 	EnableProfiling bool
 
-	// ProfileDir is the directory containing site profile files.
+	// ProfileDir 是包含站点配置文件的目录。
 	ProfileDir string
 
-	// BackendDialer is an optional custom dialer for backend connections.
+	// BackendDialer 是可选的用于后端连接的自定义拨号器。
 	BackendDialer func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-// RelayServer wraps the relay server for public consumption.
+// RelayServer 封装中继服务器供公共使用。
 type RelayServer struct {
 	srv *relay.Server
 }
 
-// NewRelayServer creates a new Chimney relay server.
-// The server does NOT start listening until Start() is called.
+// NewRelayServer 创建一个新的 Chimney 中继服务器。
+// 服务器在调用 Start() 之前不会开始监听。
 func NewRelayServer(config *RelayConfig, logger *slog.Logger) (*RelayServer, error) {
 	cfg := &relay.Config{
 		ListenAddr:       config.ListenAddr,
@@ -1694,17 +1681,17 @@ func NewRelayServer(config *RelayConfig, logger *slog.Logger) (*RelayServer, err
 	return &RelayServer{srv: srv}, nil
 }
 
-// Start starts the relay server listener.
+// Start 启动中继服务器监听器。
 func (rs *RelayServer) Start() error {
 	return rs.srv.Start()
 }
 
-// Stop stops the relay server and waits for active connections to drain.
+// Stop 停止中继服务器并等待活动连接排空。
 func (rs *RelayServer) Stop() error {
 	return rs.srv.Stop()
 }
 
-// Stats returns the relay server statistics.
+// Stats 返回中继服务器统计信息。
 func (rs *RelayServer) Stats() *relay.Stats {
 	return rs.srv.Stats()
 }

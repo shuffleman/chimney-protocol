@@ -50,7 +50,7 @@ func TestSettings_EncodeSettings(t *testing.T) {
 		t.Fatalf("SETTINGS frame too short: %d bytes", len(frame))
 	}
 
-	// Check frame header
+	// 检查帧头部
 	fh, err := DecodeFrameHeader(frame)
 	if err != nil {
 		t.Fatalf("DecodeFrameHeader failed: %v", err)
@@ -65,7 +65,7 @@ func TestSettings_EncodeSettings(t *testing.T) {
 		t.Errorf("Flags = 0x%x, want 0", fh.Flags)
 	}
 
-	// Decode settings from payload
+	// 从负载中解码设置
 	settings, err := DecodeSettings(frame[FrameHeaderLen:])
 	if err != nil {
 		t.Fatalf("DecodeSettings failed: %v", err)
@@ -93,7 +93,7 @@ func TestSettings_EncodeSettingsAck(t *testing.T) {
 }
 
 func TestDecodeFrameHeader(t *testing.T) {
-	// Build a known frame header
+	// 构造一个已知的帧头部
 	frame := make([]byte, FrameHeaderLen)
 	frame[0] = 0x00
 	frame[1] = 0x00
@@ -124,7 +124,7 @@ func TestDecodeFrameHeader(t *testing.T) {
 }
 
 func TestDecodeFrameHeader_TooShort(t *testing.T) {
-	_, err := DecodeFrameHeader([]byte{0x00, 0x00}) // too short
+	_, err := DecodeFrameHeader([]byte{0x00, 0x00}) // 太短
 	if err != ErrFrameTooShort {
 		t.Errorf("Expected ErrFrameTooShort, got %v", err)
 	}
@@ -158,7 +158,7 @@ func TestDataFrame(t *testing.T) {
 		t.Errorf("Length = %d, want %d", fh.Length, len(payload))
 	}
 
-	// Check payload
+	// 检查负载
 	if !bytes.Equal(frame[FrameHeaderLen:], payload) {
 		t.Error("Payload doesn't match")
 	}
@@ -188,7 +188,7 @@ func TestWindowUpdateFrame(t *testing.T) {
 		t.Errorf("Length = %d, want 4", fh.Length)
 	}
 
-	// Check increment value
+	// 检查增量值
 	increment := uint32(frame[FrameHeaderLen])<<24 |
 		uint32(frame[FrameHeaderLen+1])<<16 |
 		uint32(frame[FrameHeaderLen+2])<<8 |
@@ -216,16 +216,16 @@ func TestRSTStreamFrame(t *testing.T) {
 }
 
 func TestDecodeSettings(t *testing.T) {
-	// Build a settings payload with 2 settings
+	// 构造一个包含 2 个设置的负载
 	payload := make([]byte, 12)
-	// Setting 1: HEADER_TABLE_SIZE = 8192
+	// 设置 1：HEADER_TABLE_SIZE = 8192
 	payload[0] = 0x00
 	payload[1] = 0x01 // ID
 	payload[2] = 0x00
 	payload[3] = 0x00
 	payload[4] = 0x20
 	payload[5] = 0x00 // Value = 8192
-	// Setting 2: MAX_CONCURRENT_STREAMS = 128
+	// 设置 2：MAX_CONCURRENT_STREAMS = 128
 	payload[6] = 0x00
 	payload[7] = 0x03 // ID
 	payload[8] = 0x00
@@ -250,7 +250,7 @@ func TestDecodeSettings(t *testing.T) {
 }
 
 func TestDecodeSettings_InvalidLength(t *testing.T) {
-	_, err := DecodeSettings([]byte{0x00, 0x01, 0x00}) // 3 bytes, not multiple of 6
+	_, err := DecodeSettings([]byte{0x00, 0x01, 0x00}) // 3 字节，不是 6 的倍数
 	if err == nil {
 		t.Error("Expected error for invalid payload length")
 	}
@@ -260,13 +260,13 @@ func TestGenerateClientOpeningSequence(t *testing.T) {
 	s := DefaultSettings()
 	seq := GenerateClientOpeningSequence(s)
 
-	// Should start with preface
+	// 应以简介开头
 	preface := []byte(H2ConnectionPreface)
 	if !bytes.HasPrefix(seq, preface) {
 		t.Error("Opening sequence doesn't start with preface")
 	}
 
-	// Should contain SETTINGS frame after preface
+	// 应在简介之后包含 SETTINGS 帧
 	remaining := seq[len(preface):]
 	if len(remaining) < FrameHeaderLen {
 		t.Fatal("No SETTINGS frame after preface")
@@ -285,12 +285,12 @@ func TestGenerateServerOpeningSequence(t *testing.T) {
 	s := DefaultSettings()
 	seq := GenerateServerOpeningSequence(s)
 
-	// Should contain SETTINGS + SETTINGS ACK
+	// 应包含 SETTINGS + SETTINGS ACK
 	if len(seq) < FrameHeaderLen*2 {
 		t.Fatal("Server opening sequence too short")
 	}
 
-	// First frame: SETTINGS
+	// 第一帧：SETTINGS
 	fh1, _ := DecodeFrameHeader(seq)
 	if fh1.Type != FrameSettings {
 		t.Errorf("First frame type = 0x%x, want SETTINGS", fh1.Type)
@@ -299,7 +299,7 @@ func TestGenerateServerOpeningSequence(t *testing.T) {
 		t.Error("First SETTINGS should not have ACK")
 	}
 
-	// Second frame: SETTINGS ACK
+	// 第二帧：SETTINGS ACK
 	fh2, _ := DecodeFrameHeader(seq[FrameHeaderLen+int(fh1.Length):])
 	if fh2.Type != FrameSettings {
 		t.Errorf("Second frame type = 0x%x, want SETTINGS", fh2.Type)
@@ -336,7 +336,7 @@ func TestParsePrefaceAndSettings_InvalidPreface(t *testing.T) {
 func TestStreamManager(t *testing.T) {
 	sm := NewStreamManager(false) // client-side
 
-	// Create stream
+	// 创建流
 	stream := sm.CreateStream(65535)
 	if stream == nil {
 		t.Fatal("CreateStream returned nil")
@@ -348,7 +348,7 @@ func TestStreamManager(t *testing.T) {
 		t.Errorf("Stream state = %d, want StreamOpen", stream.State)
 	}
 
-	// Get stream
+	// 获取流
 	got, ok := sm.GetStream(1)
 	if !ok {
 		t.Fatal("GetStream returned not found")
@@ -357,13 +357,13 @@ func TestStreamManager(t *testing.T) {
 		t.Errorf("Got stream ID = %d, want 1", got.ID)
 	}
 
-	// Create another stream
+	// 创建另一个流
 	stream2 := sm.CreateStream(65535)
 	if stream2.ID != 3 {
 		t.Errorf("Second stream ID = %d, want 3", stream2.ID)
 	}
 
-	// Close stream
+	// 关闭流
 	sm.CloseStream(1)
 	got, _ = sm.GetStream(1)
 	if got.State != StreamClosed {
@@ -402,7 +402,7 @@ func TestStreamManager_WindowUpdate(t *testing.T) {
 }
 
 func TestNewEngine(t *testing.T) {
-	// Create a mock record codec
+	// 创建一个模拟记录编解码器
 	key := make([]byte, 16)
 	nonce := make([]byte, 12)
 	codec, err := record.NewCodec(key, nonce)
@@ -425,7 +425,7 @@ func TestNewEngine(t *testing.T) {
 }
 
 func TestFrameConstants(t *testing.T) {
-	// Verify frame type constants
+	// 验证帧类型常量
 	if FrameData != 0x0 {
 		t.Errorf("FrameData = 0x%x, want 0x0", FrameData)
 	}
@@ -439,7 +439,7 @@ func TestFrameConstants(t *testing.T) {
 		t.Errorf("FrameWindowUpdate = 0x%x, want 0x8", FrameWindowUpdate)
 	}
 
-	// Verify flag constants
+	// 验证标志常量
 	if FlagEndStream != 0x1 {
 		t.Errorf("FlagEndStream = 0x%x, want 0x1", FlagEndStream)
 	}
@@ -447,7 +447,7 @@ func TestFrameConstants(t *testing.T) {
 		t.Errorf("FlagEndHeaders = 0x%x, want 0x4", FlagEndHeaders)
 	}
 
-	// Verify error codes
+	// 验证错误码
 	if H2ErrNoError != 0x0 {
 		t.Errorf("H2ErrNoError = %d, want 0", H2ErrNoError)
 	}
@@ -455,7 +455,7 @@ func TestFrameConstants(t *testing.T) {
 		t.Errorf("H2ErrProtocolError = %d, want 1", H2ErrProtocolError)
 	}
 
-	// Verify settings IDs
+	// 验证设置 ID
 	if SettingHeaderTableSize != 0x1 {
 		t.Errorf("SettingHeaderTableSize = 0x%x, want 0x1", SettingHeaderTableSize)
 	}
@@ -494,14 +494,14 @@ func BenchmarkDecodeFrameHeader(b *testing.B) {
 }
 
 func TestPaddingStreamID(t *testing.T) {
-	// Padding stream ID must be odd (client-initiated) and non-zero
+	// 填充流 ID 必须为奇数（客户端发起）且非零
 	if PaddingStreamID == 0 {
 		t.Error("PaddingStreamID must not be zero")
 	}
 	if PaddingStreamID%2 == 0 {
 		t.Error("PaddingStreamID should be odd (client-initiated)")
 	}
-	// Must fit in 31 bits (H2 stream ID limit)
+	// 必须适合 31 位（H2 流 ID 限制）
 	if PaddingStreamID > 0x7FFFFFFF {
 		t.Error("PaddingStreamID exceeds 31-bit limit")
 	}
@@ -531,12 +531,12 @@ func TestWritePaddedRecord_NoPaddingNeeded(t *testing.T) {
 	settings := DefaultSettings()
 	engine := NewEngine(settings, codec)
 
-	// Pipe writes to a buffer that the record reader can read
+	// 将写入管道到记录读取器可以读取的缓冲区
 	pr, pw := io.Pipe()
 	engine.SetRecordIO(nil, record.NewRecordWriter(pw, codec))
 
-	// Write small data with a small target — should need no padding
-	payload := []byte{0x02, 'h', 'e', 'l', 'l', 'o'} // 6 bytes with 0x02 prefix
+	// 写入小数据，目标很小——应不需要填充
+	payload := []byte{0x02, 'h', 'e', 'l', 'l', 'o'} // 6 字节，带 0x02 前缀
 	go func() {
 		err := engine.WritePaddedRecord(1, payload, uint16(FrameHeaderLen+len(payload)), false)
 		if err != nil {
@@ -545,14 +545,14 @@ func TestWritePaddedRecord_NoPaddingNeeded(t *testing.T) {
 		pw.Close()
 	}()
 
-	// Read back the record
+	// 读取回记录
 	reader := record.NewRecordReader(pr, codec)
 	plaintext, err := reader.ReadRecord()
 	if err != nil {
 		t.Fatalf("ReadRecord failed: %v", err)
 	}
 
-	// Should contain exactly one DATA frame (no padding)
+	// 应仅包含一个 DATA 帧（无填充）
 	fh, err := DecodeFrameHeader(plaintext)
 	if err != nil {
 		t.Fatalf("DecodeFrameHeader failed: %v", err)
@@ -566,7 +566,7 @@ func TestWritePaddedRecord_NoPaddingNeeded(t *testing.T) {
 	if !bytes.Equal(plaintext[FrameHeaderLen:FrameHeaderLen+int(fh.Length)], payload) {
 		t.Error("Payload mismatch")
 	}
-	// No padding frame should follow
+	// 之后不应有填充帧
 	if len(plaintext) > FrameHeaderLen+int(fh.Length) {
 		t.Error("Unexpected extra data after tunnel frame")
 	}
@@ -603,7 +603,7 @@ func TestWritePaddedRecord_WithPadding(t *testing.T) {
 		t.Fatalf("ReadRecord failed: %v", err)
 	}
 
-	// First frame should be tunnel DATA on stream 1
+	// 第一帧应为隧道 DATA（流 1）
 	fh1, err := DecodeFrameHeader(plaintext)
 	if err != nil {
 		t.Fatalf("DecodeFrameHeader (tunnel) failed: %v", err)
@@ -615,7 +615,7 @@ func TestWritePaddedRecord_WithPadding(t *testing.T) {
 		t.Errorf("Expected stream 1, got %d", fh1.StreamID)
 	}
 
-	// Second frame should be padding DATA on PaddingStreamID
+	// 第二帧应为填充 DATA（PaddingStreamID）
 	frame1End := FrameHeaderLen + int(fh1.Length)
 	if len(plaintext) <= frame1End {
 		t.Fatal("No padding frame found after tunnel frame")
@@ -632,7 +632,7 @@ func TestWritePaddedRecord_WithPadding(t *testing.T) {
 		t.Errorf("Expected padding stream %d, got %d", PaddingStreamID, fh2.StreamID)
 	}
 
-	// Total plaintext should be close to targetSize
+	// 总明文应接近 targetSize
 	totalLen := len(plaintext)
 	if totalLen != int(targetSize) {
 		t.Logf("Total plaintext = %d, target = %d (padding may not be exact due to frame alignment)", totalLen, targetSize)
@@ -668,7 +668,7 @@ func TestWritePadding(t *testing.T) {
 		t.Fatalf("ReadRecord failed: %v", err)
 	}
 
-	// Should be a single padding DATA frame
+	// 应为一个单独的填充 DATA 帧
 	fh, err := DecodeFrameHeader(plaintext)
 	if err != nil {
 		t.Fatalf("DecodeFrameHeader failed: %v", err)
@@ -709,7 +709,7 @@ func TestWriteCombinedRecord(t *testing.T) {
 		t.Fatalf("ReadRecord failed: %v", err)
 	}
 
-	// Verify both frames are present
+	// 验证两个帧都存在
 	expectedLen := len(frame1) + len(frame2)
 	if len(plaintext) != expectedLen {
 		t.Errorf("Combined length = %d, want %d", len(plaintext), expectedLen)

@@ -1,4 +1,4 @@
-// Package config provides configuration loading and validation for Chimney.
+// Package config 提供 Chimney 的配置加载和验证。
 package config
 
 import (
@@ -11,115 +11,115 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// RelayConfig is the configuration for the relay server.
+// RelayConfig 是中继服务器的配置。
 type RelayConfig struct {
-	// Listen address (e.g., ":443" or "0.0.0.0:443")
+	// 监听地址（例如 ":443" 或 "0.0.0.0:443"）
 	ListenAddr string `yaml:"listen_addr"`
 
-	// PSK is the pre-shared key (hex-encoded string).
-	// Optional if Users or UserIDs is set.
+	// PSK 是预共享密钥（hex 编码字符串）。
+	// 如果设置了 Users 或 UserIDs 则可选。
 	PSK string `yaml:"psk,omitempty"`
 
-	// Users maps user identifiers to their hex-encoded PSKs.
-	// Optional if PSK or UserIDs is set.
+	// Users 将用户标识符映射到其 hex 编码的 PSK。
+	// 如果设置了 PSK 或 UserIDs 则可选。
 	Users map[string]string `yaml:"users,omitempty"`
 
-	// UserIDs is a list of user identifiers (e.g. UUIDs) for multi-user mode.
-	// Each user's PSK is derived as SHA256(userID). This is the recommended field.
-	// Optional if PSK or Users is set.
+	// UserIDs 是多用户模式的用户标识符列表（例如 UUID）。
+	// 每个用户的 PSK 派生为 SHA256(userID)。这是推荐字段。
+	// 如果设置了 PSK 或 Users 则可选。
 	UserIDs []string `yaml:"user_ids,omitempty"`
 
-	// TagLen is the authentication tag length in bytes (8-16).
+	// TagLen 是认证标签长度（字节，8-16）。
 	TagLen int `yaml:"tag_len"`
 
-	// IntentFile is the path to the intent whitelist YAML file.
+	// IntentFile 是意图白名单 YAML 文件的路径。
 	IntentFile string `yaml:"intent_file"`
 
-	// EnforceFile is the path to the enforce CIDR YAML file.
+	// EnforceFile 是强制 CIDR YAML 文件的路径。
 	EnforceFile string `yaml:"enforce_file"`
 
-	// CloudRegion is the cloud region for CIDR validation (e.g., "us-east-1").
+	// CloudRegion 是 CIDR 验证的云区域（例如 "us-east-1"）。
 	CloudRegion string `yaml:"cloud_region"`
 
-	// DefaultBackend is the fallback backend address for non-authenticated traffic.
-	// Format: "host:port". If empty, connections are closed naturally on failure.
+	// DefaultBackend 是未认证流量的回退后端地址。
+	// 格式："host:port"。如果为空，失败时自然关闭连接。
 	DefaultBackend string `yaml:"default_backend,omitempty"`
 
-	// HandshakeTimeout is the maximum time for TLS handshake relay.
+	// HandshakeTimeout 是 TLS 握手中继的最大时间。
 	HandshakeTimeout time.Duration `yaml:"handshake_timeout"`
 
-	// AuthReadTimeout is the timeout for reading the auth record.
+	// AuthReadTimeout 是读取认证记录的超时时间。
 	AuthReadTimeout time.Duration `yaml:"auth_read_timeout"`
 
-	// EnableProfiling enables traffic profiling and pacing.
+	// EnableProfiling 启用流量分析和节奏控制。
 	EnableProfiling bool `yaml:"enable_profiling"`
 
-	// ProfileDir is the directory containing site profile JSON files.
+	// ProfileDir 是包含站点 Profile JSON 文件的目录。
 	ProfileDir string `yaml:"profile_dir,omitempty"`
 
-	// CIDRRefreshInterval is how often to refresh CIDR lists from cloud providers.
+	// CIDRRefreshInterval 是从云服务商刷新 CIDR 列表的频率。
 	CIDRRefreshInterval time.Duration `yaml:"cidr_refresh_interval,omitempty"`
 
-	// LogLevel is the logging level (debug, info, warn, error).
+	// LogLevel 是日志级别（debug, info, warn, error）。
 	LogLevel string `yaml:"log_level"`
 
-	// MetricsAddr is the address for Prometheus metrics endpoint.
-	// If empty, metrics are disabled.
+	// MetricsAddr 是 Prometheus 指标端点的地址。
+	// 如果为空，则禁用指标。
 	MetricsAddr string `yaml:"metrics_addr,omitempty"`
 
-	// MetricsToken protects admin endpoints. If empty, admin endpoints are
-	// restricted to loopback clients only.
+	// MetricsToken 保护管理端点。如果为空，管理端点
+	// 仅限 loopback 客户端访问。
 	MetricsToken string `yaml:"metrics_token,omitempty"`
 
-	// ConnectAllowCIDRs limits authenticated CONNECT targets to these CIDR
-	// ranges. Empty means no allow-list restriction.
+	// ConnectAllowCIDRs 限制已认证 CONNECT 目标在这些 CIDR
+	// 范围内。为空表示不做白名单限制。
 	ConnectAllowCIDRs []string `yaml:"connect_allow_cidrs,omitempty"`
 
-	// ConnectDenyCIDRs rejects authenticated CONNECT targets in these CIDR
-	// ranges. Deny rules take precedence over allow rules.
+	// ConnectDenyCIDRs 拒绝已认证 CONNECT 目标在这些 CIDR
+	// 范围内。拒绝规则优先于允许规则。
 	ConnectDenyCIDRs []string `yaml:"connect_deny_cidrs,omitempty"`
 
-	// ConnectDenyPrivate rejects private, loopback, link-local, multicast, and
-	// unspecified CONNECT targets after authentication.
+	// ConnectDenyPrivate 在认证后拒绝私有、loopback、链路本地、
+	// 多播和未指定 CONNECT 目标。
 	ConnectDenyPrivate bool `yaml:"connect_deny_private,omitempty"`
 }
 
-// ClientConfig is the configuration for the client.
+// ClientConfig 是客户端的配置。
 type ClientConfig struct {
-	// RelayAddr is the relay server address (host:port).
+	// RelayAddr 是中继服务器地址（host:port）。
 	RelayAddr string `yaml:"relay_addr"`
 
-	// SNI is the Server Name Indicator to use (must be in relay's whitelist).
+	// SNI 是要使用的服务器名称指示（必须在中继的白名单中）。
 	SNI string `yaml:"sni"`
 
-	// DestAddr is the final destination address (host:port).
+	// DestAddr 是最终目标地址（host:port）。
 	DestAddr string `yaml:"dest_addr"`
 
-	// PSK is the pre-shared key (hex-encoded string).
-	// Optional if UserID is set.
+	// PSK 是预共享密钥（hex 编码字符串）。
+	// 如果设置了 UserID 则可选。
 	PSK string `yaml:"psk,omitempty"`
 
-	// UserID is the user identifier (e.g. UUID) for multi-user relay.
-	// If set, PSK is derived as SHA256(UserID) when PSK is empty.
+	// UserID 是多用户中继的用户标识符（例如 UUID）。
+	// 如果设置了且 PSK 为空，则 PSK 派生为 SHA256(UserID)。
 	UserID string `yaml:"user_id,omitempty"`
 
-	// TagLen is the authentication tag length.
+	// TagLen 是认证标签长度。
 	TagLen int `yaml:"tag_len"`
 
-	// ListenAddr is the local SOCKS5 proxy address.
+	// ListenAddr 是本地 SOCKS5 代理地址。
 	ListenAddr string `yaml:"listen_addr"`
 
-	// UTlsFingerprint is the uTLS fingerprint to use (e.g., "chrome", "firefox", "safari").
+	// UTlsFingerprint 是要使用的 uTLS 指纹（例如 "chrome", "firefox", "safari"）。
 	UTlsFingerprint string `yaml:"utls_fingerprint,omitempty"`
 
-	// ConnectTimeout is the timeout for relay connections.
+	// ConnectTimeout 是中继连接的超时时间。
 	ConnectTimeout time.Duration `yaml:"connect_timeout"`
 
-	// HandshakeTimeout is the timeout for TLS handshake.
+	// HandshakeTimeout 是 TLS 握手的超时时间。
 	HandshakeTimeout time.Duration `yaml:"handshake_timeout"`
 }
 
-// DefaultRelayConfig returns a default relay configuration.
+// DefaultRelayConfig 返回默认的中继配置。
 func DefaultRelayConfig() *RelayConfig {
 	return &RelayConfig{
 		ListenAddr:          ":443",
@@ -134,7 +134,7 @@ func DefaultRelayConfig() *RelayConfig {
 	}
 }
 
-// DefaultClientConfig returns a default client configuration.
+// DefaultClientConfig 返回默认的客户端配置。
 func DefaultClientConfig() *ClientConfig {
 	return &ClientConfig{
 		TagLen:           16,
@@ -145,7 +145,7 @@ func DefaultClientConfig() *ClientConfig {
 	}
 }
 
-// Validate validates the relay configuration.
+// Validate 验证中继配置。
 func (c *RelayConfig) Validate() error {
 	if c.ListenAddr == "" {
 		return fmt.Errorf("config: listen_addr is required")
@@ -184,7 +184,7 @@ func (c *RelayConfig) Validate() error {
 	return nil
 }
 
-// Validate validates the client configuration.
+// Validate 验证客户端配置。
 func (c *ClientConfig) Validate() error {
 	if c.RelayAddr == "" {
 		return fmt.Errorf("config: relay_addr is required")
@@ -225,7 +225,7 @@ func validateCIDRs(field string, cidrs []string) error {
 	return nil
 }
 
-// LoadRelayConfig loads relay configuration from a YAML file.
+// LoadRelayConfig 从 YAML 文件加载中继配置。
 func LoadRelayConfig(path string) (*RelayConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -244,7 +244,7 @@ func LoadRelayConfig(path string) (*RelayConfig, error) {
 	return config, nil
 }
 
-// LoadClientConfig loads client configuration from a YAML file.
+// LoadClientConfig 从 YAML 文件加载客户端配置。
 func LoadClientConfig(path string) (*ClientConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -263,7 +263,7 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 	return config, nil
 }
 
-// SaveRelayConfig saves relay configuration to a YAML file.
+// SaveRelayConfig 将中继配置保存到 YAML 文件。
 func SaveRelayConfig(path string, config *RelayConfig) error {
 	data, err := yaml.Marshal(config)
 	if err != nil {
@@ -277,7 +277,7 @@ func SaveRelayConfig(path string, config *RelayConfig) error {
 	return nil
 }
 
-// SaveClientConfig saves client configuration to a YAML file.
+// SaveClientConfig 将客户端配置保存到 YAML 文件。
 func SaveClientConfig(path string, config *ClientConfig) error {
 	data, err := yaml.Marshal(config)
 	if err != nil {

@@ -1,19 +1,17 @@
-// Package auth implements the covert authentication mechanism (Part II §8).
+// Package auth 实现隐蔽认证机制（Part II §8）。
 //
-// The authentication is based on a shared PSK and uses HMAC-SHA256 over
-// the TLS ServerRandom and ClientRandom observed during the borrowed
-// handshake. The current protocol sends the auth tag as an H2 DATA frame
-// after the ChimneyRecord/H2 opening sequence.
+// 认证基于共享的 PSK，使用 HMAC-SHA256 基于
+// TLS ServerRandom 和 ClientRandom（在借用的握手过程中观察到）进行计算。
+// 当前协议在 ChimneyRecord/H2 开启序列之后将认证标签作为 H2 DATA 帧发送。
 //
 //	K_auth = HKDF(PSK, label="chimney-auth", info = ServerRandom)
 //	tag = HMAC(K_auth, ServerRandom || ClientRandom)[:TAG_LEN]
 //
-// Key properties:
-//   - ServerRandom is plaintext in TLS 1.3 ServerHello, so the relay can
-//     observe it during forwarding without needing the TLS session key.
-//   - The tag is indistinguishable from random ciphertext to observers
-//     without the PSK.
-//   - Each session has a unique tag (bound to ServerRandom), preventing replay.
+// 关键特性：
+//   - ServerRandom 在 TLS 1.3 ServerHello 中是明文的，因此中继可以在
+//     转发过程中观察到它，无需 TLS 会话密钥。
+//   - 没有 PSK 的观察者无法将标签与随机密文区分。
+//   - 每个会话都有唯一标签（绑定到 ServerRandom），防止重放。
 package auth
 
 import (
@@ -27,27 +25,27 @@ import (
 )
 
 const (
-	// DefaultTagLen is the default authentication tag length (16 bytes).
+	// DefaultTagLen 是默认认证标签长度（16 字节）。
 	DefaultTagLen = keyderiv.DefaultTagLen
 
-	// MinTagLen is the minimum recommended tag length (8 bytes per spec).
+	// MinTagLen 是最小推荐标签长度（规范要求 8 字节）。
 	MinTagLen = 8
 
-	// MaxTagLen is the maximum tag length (SHA-256 output size).
+	// MaxTagLen 是最大标签长度（SHA-256 输出大小）。
 	MaxTagLen = sha256.Size
 )
 
 var (
-	// ErrInvalidTagLen is returned when the tag length is out of range.
+	// ErrInvalidTagLen 标签长度超出范围时返回。
 	ErrInvalidTagLen = errors.New("auth: invalid tag length")
 
-	// ErrServerRandomLength is returned when ServerRandom is not 32 bytes.
+	// ErrServerRandomLength 当 ServerRandom 不是 32 字节时返回。
 	ErrServerRandomLength = errors.New("auth: ServerRandom must be 32 bytes")
 
-	// ErrRecordBytesEmpty is returned when record bytes are empty.
+	// ErrRecordBytesEmpty 当记录字节为空时返回。
 	ErrRecordBytesEmpty = errors.New("auth: record bytes cannot be empty")
 
-	// ErrAuthFailed is returned when authentication verification fails.
+	// ErrAuthFailed 认证验证失败时返回。
 	ErrAuthFailed = errors.New("auth: authentication failed")
 )
 
@@ -129,43 +127,38 @@ func (a *Authenticator) MustVerifyTag(serverRandom, recordBytes, tag []byte) err
 	return nil
 }
 
-// TagLen returns the configured tag length.
+// TagLen 返回配置的标签长度。
 func (a *Authenticator) TagLen() int {
 	return a.tagLen
 }
 
-// EmbedTagLocation describes the older design where the first application_data record
-// the auth tag should be embedded.
+// EmbedTagLocation 描述了旧设计中认证标签应嵌入的位置。
+// 第一个 application_data 记录。
 //
-// The tag is embedded at a fixed offset within the encrypted payload.
-// Both client and relay know this offset from the protocol specification.
-// The offset must be large enough to accommodate the tag but not so large
-// that it exceeds typical first-record sizes.
+// 标签嵌入在加密负载内的固定偏移处。
+// 客户端和中继都知道这个偏移量（来自协议规范）。
+// 偏移量必须足够大以容纳标签，但不能太大
+// 以至于超过典型的首记录大小。
 type EmbedTagLocation struct {
-	// PayloadOffset is the byte offset within the AEAD plaintext payload
-	// where the tag starts.
+	// PayloadOffset 是 AEAD 明文负载内标签开始的字节偏移。
 	PayloadOffset int
 
-	// TagLen is the length of the tag in bytes.
+	// TagLen 是标签的字节长度。
 	TagLen int
 }
 
-// DefaultEmbedLocation is the default tag embedding location for the older
-// pre-H2-auth design.
-// The tag is placed at offset 0 within the first application_data record's
-// plaintext payload. This means the first bytes of the H2 frame stream
-// (after decryption) contain the auth tag.
+// DefaultEmbedLocation 是旧的 pre-H2-auth 设计的默认标签嵌入位置。
+// 标签放置在第一个 application_data 记录的明文负载的偏移 0 处。
+// 这意味着 H2 帧流（解密后）的第一个字节包含认证标签。
 //
-// Current client/relay code sends [key_hint][auth_tag] as an H2 DATA frame
-// after the ChimneyRecord/H2 handshake, so this location helper is retained
-// only for tests and legacy helpers.
+// 当前客户端/中继代码在 ChimneyRecord/H2 握手之后将 [key_hint][auth_tag]
+// 作为 H2 DATA 帧发送，因此此位置辅助函数仅保留用于测试和旧辅助功能。
 var DefaultEmbedLocation = EmbedTagLocation{
 	PayloadOffset: 0,
 	TagLen:        DefaultTagLen,
 }
 
-// ExtractTag extracts the auth tag from the decrypted payload of the first
-// application_data record.
+// ExtractTag 从第一个 application_data 记录的解密负载中提取认证标签。
 func ExtractTag(payload []byte, loc EmbedTagLocation) ([]byte, []byte, error) {
 	if loc.PayloadOffset+loc.TagLen > len(payload) {
 		return nil, nil, errors.New("auth: payload too short for tag extraction")
@@ -175,7 +168,7 @@ func ExtractTag(payload []byte, loc EmbedTagLocation) ([]byte, []byte, error) {
 	return tag, remaining, nil
 }
 
-// EmbedTag embeds the auth tag into a payload at the specified location.
+// EmbedTag 将认证标签嵌入到指定位置的负载中。
 func EmbedTag(payload []byte, tag []byte, loc EmbedTagLocation) []byte {
 	result := make([]byte, 0, loc.PayloadOffset+len(tag)+len(payload)-loc.PayloadOffset)
 	result = append(result, payload[:loc.PayloadOffset]...)
@@ -184,29 +177,28 @@ func EmbedTag(payload []byte, tag []byte, loc EmbedTagLocation) []byte {
 	return result
 }
 
-// ServerRandomExtractor extracts ServerRandom from a TLS 1.3 ServerHello message.
-// This is used by the relay to obtain ServerRandom during pure TCP forwarding
-// without decrypting the TLS handshake.
+// ServerRandomExtractor 从 TLS 1.3 ServerHello 消息中提取 ServerRandom。
+// 中继在纯 TCP 转发期间使用它来获取 ServerRandom，
+// 而无需解密 TLS 握手。
 //
-// ServerHello structure (simplified, TLS 1.3):
+// ServerHello 结构（简化版，TLS 1.3）：
 //
 //	struct {
-//	    HandshakeType msg_type;     // 1 byte = 0x02 for ServerHello
+//	    HandshakeType msg_type;     // 1 byte = 0x02 表示 ServerHello
 //	    uint24 length;
 //	    ProtocolVersion version;    // 2 bytes = 0x0303
-//	    Random random;              // 32 bytes  <-- THIS IS WHAT WE WANT
+//	    Random random;              // 32 bytes  <-- 这才是我们要的
 //	    ...
 //	}
 //
-// Note: This operates on the raw handshake bytes as seen on the wire during
-// TCP forwarding. The relay observes these bytes in plaintext because TLS 1.3
-// encrypts only after the ServerHello.
+// 注意：此操作针对 TCP 转发期间线路上看到的原始握手字节。
+// 中继以明文形式观察到这些字节，因为 TLS 1.3 仅在 ServerHello 之后加密。
 type ServerRandomExtractor struct{}
 
-// ExtractFromServerHello extracts the 32-byte ServerRandom from a TLS ServerHello.
-// The data should start with the ServerHello handshake message.
+// ExtractFromServerHello 从 TLS ServerHello 中提取 32 字节的 ServerRandom。
+// 数据应以 ServerHello 握手消息开头。
 //
-// Returns the ServerRandom and any error.
+// 返回 ServerRandom 和可能的错误。
 func (e *ServerRandomExtractor) ExtractFromServerHello(data []byte) ([]byte, error) {
 	if len(data) < 4 {
 		return nil, errors.New("auth: insufficient data for ServerHello header")
@@ -217,7 +209,7 @@ func (e *ServerRandomExtractor) ExtractFromServerHello(data []byte) ([]byte, err
 		return nil, fmt.Errorf("auth: expected ServerHello (0x02), got 0x%02x", msgType)
 	}
 
-	// length is 3 bytes
+	// length 是 3 字节
 	length := uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3])
 	if len(data) < 4+int(length) {
 		return nil, errors.New("auth: ServerHello data shorter than length indicates")
@@ -225,7 +217,7 @@ func (e *ServerRandomExtractor) ExtractFromServerHello(data []byte) ([]byte, err
 
 	body := data[4 : 4+length]
 
-	// Parse ServerHello body:
+	// 解析 ServerHello 体：
 	// version (2) + random (32) + session_id_len (1) + session_id + ...
 	if len(body) < 2+32 {
 		return nil, errors.New("auth: ServerHello body too short")
@@ -233,8 +225,8 @@ func (e *ServerRandomExtractor) ExtractFromServerHello(data []byte) ([]byte, err
 
 	version := uint16(body[0])<<8 | uint16(body[1])
 	if version != 0x0303 {
-		// TLS 1.3 uses 0x0303 in ServerHello for compatibility
-		// but we allow other versions for flexibility
+		// TLS 1.3 在 ServerHello 中使用 0x0303 以保持兼容性
+		// 但我们允许其他版本以保持灵活性
 		_ = version
 	}
 
@@ -244,9 +236,9 @@ func (e *ServerRandomExtractor) ExtractFromServerHello(data []byte) ([]byte, err
 	return serverRandom, nil
 }
 
-// ExtractFromHandshakeMessages scans through a sequence of TLS handshake
-// messages and extracts ServerRandom from the first ServerHello found.
-// This is useful when the relay has buffered multiple handshake messages.
+// ExtractFromHandshakeMessages 扫描一系列 TLS 握手消息，
+// 并从找到的第一个 ServerHello 中提取 ServerRandom。
+// 当中继已缓冲多条握手消息时，这很有用。
 func (e *ServerRandomExtractor) ExtractFromHandshakeMessages(data []byte) ([]byte, error) {
 	offset := 0
 	for offset < len(data) {
@@ -267,15 +259,14 @@ func (e *ServerRandomExtractor) ExtractFromHandshakeMessages(data []byte) ([]byt
 	return nil, errors.New("auth: no ServerHello found in handshake messages")
 }
 
-// ExtractFromTLSRecords parses raw TLS record bytes (as seen on the wire during
-// TCP forwarding), strips the 5-byte TLS record headers from Handshake records
-// (ContentType=0x16), and feeds the concatenated handshake message payloads to
-// ExtractFromHandshakeMessages.
+// ExtractFromTLSRecords 解析原始 TLS 记录字节（TCP 转发期间在线路上看到的），
+// 从 Handshake 记录（ContentType=0x16）中剥离 5 字节的 TLS 记录头，
+// 并将拼接后的握手消息负载传给 ExtractFromHandshakeMessages。
 //
-// This is the method the relay should use during blind TCP forwarding, since
-// the relay sees TLS records, not bare handshake messages.
+// 这是中继在盲目 TCP 转发期间应使用的方法，因为
+// 中继看到的是 TLS 记录，而不是原始的握手消息。
 //
-// TLS record format:
+// TLS 记录格式：
 //
 //	struct {
 //	    ContentType type;      // 1 byte
@@ -291,7 +282,7 @@ func (e *ServerRandomExtractor) ExtractFromTLSRecords(data []byte) ([]byte, erro
 		recordLen := int(data[offset+3])<<8 | int(data[offset+4])
 
 		if offset+5+recordLen > len(data) {
-			break // incomplete record
+			break // 不完整的记录
 		}
 
 		if contentType == 0x16 { // Handshake
@@ -308,10 +299,10 @@ func (e *ServerRandomExtractor) ExtractFromTLSRecords(data []byte) ([]byte, erro
 	return e.ExtractFromHandshakeMessages(handshakeMsgs)
 }
 
-// ClientRandomExtractor extracts ClientRandom from a TLS ClientHello.
+// ClientRandomExtractor 从 TLS ClientHello 中提取 ClientRandom。
 type ClientRandomExtractor struct{}
 
-// ExtractFromClientHello extracts the 32-byte ClientRandom from a TLS ClientHello.
+// ExtractFromClientHello 从 TLS ClientHello 中提取 32 字节的 ClientRandom。
 func (e *ClientRandomExtractor) ExtractFromClientHello(data []byte) ([]byte, error) {
 	if len(data) < 4 {
 		return nil, errors.New("auth: insufficient data for ClientHello header")
@@ -338,53 +329,51 @@ func (e *ClientRandomExtractor) ExtractFromClientHello(data []byte) ([]byte, err
 	return clientRandom, nil
 }
 
-// RecordBytesCollector collects observable bytes for the older first-record
-// auth-tag design.
+// RecordBytesCollector 为旧的首次记录认证标签设计收集可观测字节。
 //
-// In the older design these bytes were the complete on-the-wire record:
-// the 5-byte header (type || version || length) followed by the ciphertext.
+// 在旧设计中，这些字节是完整的在线记录：
+// 5 字节头（type || version || length）后跟密文。
 type RecordBytesCollector struct {
 	buf []byte
 }
 
-// NewRecordBytesCollector creates a new collector.
+// NewRecordBytesCollector 创建一个新的收集器。
 func NewRecordBytesCollector() *RecordBytesCollector {
 	return &RecordBytesCollector{buf: make([]byte, 0, 4096)}
 }
 
-// Write appends data to the collector.
+// Write 将数据追加到收集器。
 func (rc *RecordBytesCollector) Write(p []byte) (int, error) {
 	rc.buf = append(rc.buf, p...)
 	return len(p), nil
 }
 
-// Bytes returns the collected bytes.
+// Bytes 返回收集到的字节。
 func (rc *RecordBytesCollector) Bytes() []byte {
 	return rc.buf
 }
 
-// Reset clears the collector.
+// Reset 清空收集器。
 func (rc *RecordBytesCollector) Reset() {
 	rc.buf = rc.buf[:0]
 }
 
-// UserEntry associates a user identifier with a pre-derived key deriver.
+// UserEntry 将用户标识符与预派生的密钥派生器关联。
 type UserEntry struct {
 	UserID  string
 	Deriver *keyderiv.Deriver
 }
 
-// UserStore manages authentication for multiple users, each identified by a
-// 4-byte hint derived from their user ID. The relay uses the hint from the
-// auth frame to look up the correct PSK for tag verification.
+// UserStore 管理多用户的认证，每个用户通过从其用户 ID 派生的
+// 4 字节提示标识。中继使用来自认证帧的提示来查找正确的 PSK 以进行标签验证。
 type UserStore struct {
 	mu     sync.RWMutex
 	byHint map[[4]byte]*UserEntry
 	tagLen int
 }
 
-// NewUserStore creates a UserStore from a map of userID → pskHex.
-// The key hint is computed as SHA256(userID)[:4].
+// NewUserStore 从 userID → pskHex 的映射创建 UserStore。
+// 密钥提示计算为 SHA256(userID)[:4]。
 func NewUserStore(users map[string]string, tagLen int) (*UserStore, error) {
 	if tagLen < MinTagLen || tagLen > MaxTagLen {
 		return nil, fmt.Errorf("%w: %d", ErrInvalidTagLen, tagLen)
@@ -419,18 +408,18 @@ func NewUserStore(users map[string]string, tagLen int) (*UserStore, error) {
 	return store, nil
 }
 
-// DerivePSKFromID derives a 256-bit PSK from a user identifier.
-// PSK = SHA256(userID). This allows relay deployment with only a UUID list,
-// since the same derivation happens on the client side.
+// DerivePSKFromID 从用户标识符派生 256 位 PSK。
+// PSK = SHA256(userID)。这允许仅使用 UUID 列表部署中继，
+// 因为客户端侧执行相同的派生。
 func DerivePSKFromID(userID string) []byte {
 	h := sha256.Sum256([]byte(userID))
 	return h[:]
 }
 
-// NewUserStoreFromIDs creates a UserStore from a list of user identifiers.
-// Each user's PSK is derived as PSK = SHA256(userID).
-// This is the recommended constructor for multi-user deployments where
-// UUIDs serve as both identifier and key material.
+// NewUserStoreFromIDs 从用户标识符列表创建 UserStore。
+// 每个用户的 PSK 派生为 PSK = SHA256(userID)。
+// 这是多用户部署的推荐构造函数，其中
+// UUID 同时充当标识符和密钥材料。
 func NewUserStoreFromIDs(userIDs []string, tagLen int) (*UserStore, error) {
 	users := make(map[string]string, len(userIDs))
 	for _, id := range userIDs {
@@ -439,23 +428,23 @@ func NewUserStoreFromIDs(userIDs []string, tagLen int) (*UserStore, error) {
 	return NewUserStore(users, tagLen)
 }
 
-// KeyHint returns the 4-byte hint for a given user identifier.
+// KeyHint 返回给定用户标识符的 4 字节提示。
 func (s *UserStore) KeyHint(userID string) [4]byte {
 	return keyderiv.ComputeKeyHint(userID)
 }
 
-// TagLen returns the configured tag length.
+// TagLen 返回配置的标签长度。
 func (s *UserStore) TagLen() int {
 	return s.tagLen
 }
 
-// lookup returns the entry for a given hint, or nil.
-// Caller must hold s.mu (read or write lock).
+// lookup 返回给定提示的条目，如果不存在则返回 nil。
+// 调用者必须持有 s.mu（读锁或写锁）。
 func (s *UserStore) lookup(hint [4]byte) *UserEntry {
 	return s.byHint[hint]
 }
 
-// GenerateTag computes the auth tag for a user identified by hint.
+// GenerateTag 计算由 hint 标识的用户的认证标签。
 func (s *UserStore) GenerateTag(hint [4]byte, serverRandom, recordBytes []byte) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -473,7 +462,7 @@ func (s *UserStore) GenerateTag(hint [4]byte, serverRandom, recordBytes []byte) 
 	return entry.Deriver.AuthTag(serverRandom, recordBytes, s.tagLen)
 }
 
-// VerifyTag verifies an auth tag for a user identified by hint.
+// VerifyTag 验证由 hint 标识的用户的认证标签。
 func (s *UserStore) VerifyTag(hint [4]byte, serverRandom, recordBytes, tag []byte) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -488,9 +477,9 @@ func (s *UserStore) VerifyTag(hint [4]byte, serverRandom, recordBytes, tag []byt
 	return entry.Deriver.VerifyAuthTag(serverRandom, recordBytes, tag)
 }
 
-// AddUser adds or replaces a user at runtime. Thread-safe.
-// If pskHex is empty, PSK is derived as SHA256(userID).
-// If a user with the same hint already exists, it is replaced.
+// AddUser 在运行时添加或替换用户。线程安全。
+// 如果 pskHex 为空，PSK 派生为 SHA256(userID)。
+// 如果具有相同 hint 的用户已存在，则替换。
 func (s *UserStore) AddUser(userID, pskHex string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -514,8 +503,8 @@ func (s *UserStore) AddUser(userID, pskHex string) error {
 	return nil
 }
 
-// RemoveUserByID removes a user by their original user identifier. Thread-safe.
-// Returns an error if the user is not found.
+// RemoveUserByID 通过用户标识符删除用户。线程安全。
+// 如果未找到用户则返回错误。
 func (s *UserStore) RemoveUserByID(userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -528,7 +517,7 @@ func (s *UserStore) RemoveUserByID(userID string) error {
 	return nil
 }
 
-// ListUserIDs returns all currently registered user identifiers. Thread-safe.
+// ListUserIDs 返回所有当前注册的用户标识符。线程安全。
 func (s *UserStore) ListUserIDs() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -540,8 +529,8 @@ func (s *UserStore) ListUserIDs() []string {
 	return ids
 }
 
-// GetAllDerivers returns all user derivers for multi-user record scanning.
-// Thread-safe.
+// GetAllDerivers 返回所有用户的派生器，用于多用户记录扫描。
+// 线程安全。
 func (s *UserStore) GetAllDerivers() []*keyderiv.Deriver {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -552,15 +541,15 @@ func (s *UserStore) GetAllDerivers() []*keyderiv.Deriver {
 	return derivers
 }
 
-// Count returns the number of registered users. Thread-safe.
+// Count 返回注册用户数。线程安全。
 func (s *UserStore) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.byHint)
 }
 
-// ExtractKeyHint extracts the 4-byte key hint from the auth frame payload.
-// The hint is the first 4 bytes of the payload.
+// ExtractKeyHint 从认证帧负载中提取 4 字节密钥提示。
+// 提示是负载的前 4 个字节。
 func ExtractKeyHint(payload []byte) ([4]byte, error) {
 	var hint [4]byte
 	if len(payload) < 4 {
@@ -570,8 +559,8 @@ func ExtractKeyHint(payload []byte) ([4]byte, error) {
 	return hint, nil
 }
 
-// ExtractTagFromHintFrame extracts the auth tag from a payload that includes
-// the 4-byte key hint prefix. Returns the tag bytes after the hint.
+// ExtractTagFromHintFrame 从包含 4 字节密钥提示前缀的负载中提取认证标签。
+// 返回提示之后的标签字节。
 func ExtractTagFromHintFrame(payload []byte, tagLen int) ([]byte, error) {
 	if len(payload) < 4+tagLen {
 		return nil, fmt.Errorf("auth: payload too short for hint frame (got %d, need %d)", len(payload), 4+tagLen)

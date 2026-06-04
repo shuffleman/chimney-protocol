@@ -1,16 +1,16 @@
-// Package h2engine implements HTTP/2 framing for the Chimney tunnel (Part III §2).
+// Package h2engine 实现 Chimney 隧道的 HTTP/2 帧处理（第三部分 §2）。
 //
-// After the swap, the internal payload of each ChimneyRecord is a stream of
-// H2 frames. This package handles:
-//   - H2 connection preface and SETTINGS exchange
-//   - DATA frame encoding/decoding for tunnel data
-//   - SETTINGS snapshot capture and replay
-//   - Frame-level I/O on the record stream
+// 交换后，每个 ChimneyRecord 的内部负载成为 H2 帧的流。
+// 本包处理：
+//   - H2 连接前导和 SETTINGS 交换
+//   - 隧道数据的 DATA 帧编码/解码
+//   - SETTINGS 快照捕获与重放
+//   - 记录流上的帧级 I/O
 //
-// The H2 frames are "real" — they carry actual H2 semantics, providing:
-//  1. Authentic record sizes (from the H2 frame structure)
-//  2. Clean multiplexing (tunnel/padding/optional real content on separate streams)
-//  3. Self-consistent flow control (WINDOW_UPDATE cadence)
+// H2 帧是“真实的”——它们携带实际的 H2 语义，提供：
+//  1. 真实的记录大小（来自 H2 帧结构）
+//  2. 清晰的多路复用（隧道/填充/可选真实内容在不同流上）
+//  3. 自洽的流控（WINDOW_UPDATE 节奏）
 package h2engine
 
 import (
@@ -23,7 +23,7 @@ import (
 	"github.com/shuffleman/chimney-protocol/internal/record"
 )
 
-// HTTP/2 frame types.
+// HTTP/2 帧类型。
 const (
 	FrameData         uint8 = 0x0
 	FrameHeaders      uint8 = 0x1
@@ -37,16 +37,16 @@ const (
 	FrameContinuation uint8 = 0x9
 )
 
-// HTTP/2 frame flags.
+// HTTP/2 帧标志。
 const (
 	FlagEndStream  uint8 = 0x1
-	FlagAck        uint8 = 0x1 // for SETTINGS and PING
+	FlagAck        uint8 = 0x1 // 用于 SETTINGS 和 PING
 	FlagEndHeaders uint8 = 0x4
 	FlagPadded     uint8 = 0x8
 	FlagPriority   uint8 = 0x20
 )
 
-// HTTP/2 error codes.
+// HTTP/2 错误码。
 const (
 	H2ErrNoError            uint32 = 0x0
 	H2ErrProtocolError      uint32 = 0x1
@@ -64,7 +64,7 @@ const (
 	H2ErrHTTP11Required     uint32 = 0xd
 )
 
-// HTTP/2 SETTINGS identifiers.
+// HTTP/2 SETTINGS 标识符。
 const (
 	SettingHeaderTableSize      uint16 = 0x1
 	SettingEnablePush           uint16 = 0x2
@@ -75,47 +75,45 @@ const (
 )
 
 const (
-	// H2ConnectionPreface is the client connection preface.
+	// H2ConnectionPreface 是客户端连接前导。
 	H2ConnectionPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
-	// DefaultMaxFrameSize is the default maximum frame payload size.
-	// 64 KiB reduces per-byte AEAD/syscall overhead by 4× vs the RFC 7540 default
-	// of 16 KiB. iOS clients can lower this via Settings to reduce per-tunnel memory.
+	// DefaultMaxFrameSize 是默认的最大帧负载大小。
+	// 64 KiB 相比 RFC 7540 默认的 16 KiB，将每字节 AEAD/系统调用开销降低了 4 倍。
+	// iOS 客户端可通过 Settings 降低此值以减少每隧道内存占用。
 	DefaultMaxFrameSize = 65536
 
-	// FrameHeaderLen is the HTTP/2 frame header length.
+	// FrameHeaderLen 是 HTTP/2 帧头长度。
 	FrameHeaderLen = 9
 
-	// DefaultSettingsFrameSize is the typical SETTINGS frame size
-	// with 6 settings: 6 * 6 + 9 = 45 bytes.
-	DefaultSettingsPayloadSize = 36 // 6 settings * 6 bytes each
+	// DefaultSettingsFrameSize 是典型 SETTINGS 帧大小（含 6 个设置项：6 * 6 + 9 = 45 字节）。
+	DefaultSettingsPayloadSize = 36 // 6 个设置项 * 每项 6 字节
 
-	// PaddingStreamID is the reserved H2 stream ID for padding frames.
-	// Padding DATA frames on this stream carry dummy bytes to fill record
-	// size targets. The relay silently discards frames on this stream.
-	// Value is a high odd number to avoid collision with normal streams.
+	// PaddingStreamID 是用于填充帧的保留 H2 流 ID。
+	// 此流上的填充 DATA 帧携带虚拟字节以达到记录大小目标。
+	// 中继节点静默丢弃此流上的帧。
+	// 值是一个大的奇数，以避免与正常流冲突。
 	PaddingStreamID = 0x0FFFFFFF
 
-	// DilutionStreamID is the reserved H2 stream ID for real content dilution.
-	// Dilution DATA frames carry pre-recorded HTTP response blocks from the
-	// whitelisted site, making traffic semantically indistinguishable from
-	// real browsing under deep packet inspection.
+	// DilutionStreamID 是用于真实内容稀释的保留 H2 流 ID。
+	// 稀释 DATA 帧携带来自白名单站点的预录 HTTP 响应数据块，
+	// 使流量在深度包检测下与真实浏览语义上无法区分。
 	DilutionStreamID = 0x0FFFFFFD
 )
 
 var (
-	// ErrFrameTooShort is returned when there's insufficient data for a frame header.
+	// ErrFrameTooShort 在帧头数据不足时返回。
 	ErrFrameTooShort = errors.New("h2engine: insufficient data for frame header")
 
-	// ErrFrameSizeError is returned when a frame exceeds MaxFrameSize.
+	// ErrFrameSizeError 在帧超过 MaxFrameSize 时返回。
 	ErrFrameSizeError = errors.New("h2engine: frame size exceeds maximum")
 
-	// ErrInvalidPreface is returned when the client preface doesn't match.
+	// ErrInvalidPreface 在客户端前导不匹配时返回。
 	ErrInvalidPreface = errors.New("h2engine: invalid client preface")
 )
 
-// Settings represents HTTP/2 SETTINGS parameters.
-// Values are stored as uint32; a nil pointer means "not set / use default".
+// Settings 表示 HTTP/2 SETTINGS 参数。
+// 值存储为 uint32；nil 指针表示“未设置 / 使用默认值”。
 type Settings struct {
 	HeaderTableSize      *uint32
 	EnablePush           *uint32
@@ -124,18 +122,18 @@ type Settings struct {
 	MaxFrameSize         *uint32
 	MaxHeaderListSize    *uint32
 
-	// MaxFrameSizeActual is the effective max frame size (default or from settings).
+	// MaxFrameSizeActual 是有效的最大帧大小（默认值或来自设置项）。
 	MaxFrameSizeActual uint32
 }
 
-// DefaultSettings returns Go's default-like settings.
-// In production, these MUST be captured from the real site (§2.2).
+// DefaultSettings 返回类似 Go 默认值的设置。
+// 生产中，这些值必须从真实站点捕获（§2.2）。
 func DefaultSettings() *Settings {
 	headerTableSize := uint32(4096)
-	enablePush := uint32(0) // Most servers disable push
+	enablePush := uint32(0) // 大多数服务器禁用推送
 	maxConcurrentStreams := uint32(100)
-	initialWindowSize := uint32(65535) // Default per RFC 7540
-	maxFrameSize := uint32(16384)      // Match Chrome/Firefox default (RFC 7540 default)
+	initialWindowSize := uint32(65535) // RFC 7540 默认值
+	maxFrameSize := uint32(16384)      // 匹配 Chrome/Firefox 默认值（RFC 7540 默认值）
 	maxHeaderListSize := uint32(uint32(1<<31) - 1)
 
 	return &Settings{
@@ -149,14 +147,14 @@ func DefaultSettings() *Settings {
 	}
 }
 
-// SiteSettings holds captured SETTINGS from a real site.
+// SiteSettings 保存从真实站点捕获的 SETTINGS。
 type SiteSettings struct {
 	SiteName   string
 	Settings   *Settings
-	RawCapture []byte // Raw SETTINGS frame bytes captured from the site
+	RawCapture []byte // 从站点捕获的原始 SETTINGS 帧字节
 }
 
-// EncodeSettings encodes the settings into a SETTINGS frame.
+// EncodeSettings 将设置编码为 SETTINGS 帧。
 func (s *Settings) EncodeSettings(ack bool) []byte {
 	var payload []byte
 
@@ -189,7 +187,7 @@ func (s *Settings) EncodeSettings(ack bool) []byte {
 		payload = buf.Bytes()
 	}
 
-	// Build frame header
+	// 构建帧头
 	frame := make([]byte, FrameHeaderLen+len(payload))
 	frame[0] = byte(len(payload) >> 16)
 	frame[1] = byte(len(payload) >> 8)
@@ -200,13 +198,13 @@ func (s *Settings) EncodeSettings(ack bool) []byte {
 	} else {
 		frame[4] = 0
 	}
-	binary.BigEndian.PutUint32(frame[5:9], 0) // Stream ID = 0 for SETTINGS
+	binary.BigEndian.PutUint32(frame[5:9], 0) // SETTINGS 的流 ID = 0
 	copy(frame[FrameHeaderLen:], payload)
 
 	return frame
 }
 
-// DecodeSettings decodes a SETTINGS frame payload into Settings values.
+// DecodeSettings 将 SETTINGS 帧负载解码为 Settings 值。
 func DecodeSettings(payload []byte) (map[uint16]uint32, error) {
 	settings := make(map[uint16]uint32)
 	if len(payload)%6 != 0 {
@@ -220,29 +218,29 @@ func DecodeSettings(payload []byte) (map[uint16]uint32, error) {
 	return settings, nil
 }
 
-// FrameHeader represents the 9-byte HTTP/2 frame header.
+// FrameHeader 表示 9 字节的 HTTP/2 帧头。
 type FrameHeader struct {
-	Length   uint32 // 24 bits
+	Length   uint32 // 24 位
 	Type     uint8
 	Flags    uint8
-	StreamID uint32 // 31 bits
+	StreamID uint32 // 31 位
 }
 
-// EncodeHeader encodes the frame header into 9 bytes.
+// EncodeHeader 将帧头编码为 9 字节。
 func (fh *FrameHeader) EncodeHeader() []byte {
 	buf := make([]byte, FrameHeaderLen)
-	// Length: 24 bits
+	// Length: 24 位
 	buf[0] = byte(fh.Length >> 16)
 	buf[1] = byte(fh.Length >> 8)
 	buf[2] = byte(fh.Length)
 	buf[3] = fh.Type
 	buf[4] = fh.Flags
-	// Stream ID: 31 bits + reserved bit
+	// Stream ID: 31 位 + 保留位
 	binary.BigEndian.PutUint32(buf[5:9], fh.StreamID&0x7FFFFFFF)
 	return buf
 }
 
-// DecodeFrameHeader decodes a 9-byte frame header.
+// DecodeFrameHeader 解码 9 字节的帧头。
 func DecodeFrameHeader(data []byte) (*FrameHeader, error) {
 	if len(data) < FrameHeaderLen {
 		return nil, ErrFrameTooShort
@@ -256,11 +254,11 @@ func DecodeFrameHeader(data []byte) (*FrameHeader, error) {
 	return fh, nil
 }
 
-// DataFrame encodes a DATA frame with the given payload.
-// streamID must be non-zero. flags can include FlagEndStream.
+// DataFrame 用给定的负载编码一个 DATA 帧。
+// streamID 必须非零。flags 可包含 FlagEndStream。
 func DataFrame(streamID uint32, flags uint8, payload []byte) []byte {
 	frame := make([]byte, FrameHeaderLen+len(payload))
-	// Length is 24 bits (3 bytes)
+	// Length 是 24 位（3 字节）
 	frame[0] = byte(len(payload) >> 16)
 	frame[1] = byte(len(payload) >> 8)
 	frame[2] = byte(len(payload))
@@ -271,7 +269,7 @@ func DataFrame(streamID uint32, flags uint8, payload []byte) []byte {
 	return frame
 }
 
-// HeadersFrame encodes a HEADERS frame.
+// HeadersFrame 编码一个 HEADERS 帧。
 func HeadersFrame(streamID uint32, flags uint8, blockFragment []byte) []byte {
 	frame := make([]byte, FrameHeaderLen+len(blockFragment))
 	frame[0] = byte(len(blockFragment) >> 16)
@@ -284,10 +282,10 @@ func HeadersFrame(streamID uint32, flags uint8, blockFragment []byte) []byte {
 	return frame
 }
 
-// WindowUpdateFrame encodes a WINDOW_UPDATE frame.
+// WindowUpdateFrame 编码一个 WINDOW_UPDATE 帧。
 func WindowUpdateFrame(streamID uint32, increment uint32) []byte {
 	frame := make([]byte, FrameHeaderLen+4)
-	// 4-byte payload
+	// 4 字节负载
 	frame[0] = 0
 	frame[1] = 0
 	frame[2] = 4
@@ -298,7 +296,7 @@ func WindowUpdateFrame(streamID uint32, increment uint32) []byte {
 	return frame
 }
 
-// RSTStreamFrame encodes an RST_STREAM frame.
+// RSTStreamFrame 编码一个 RST_STREAM 帧。
 func RSTStreamFrame(streamID uint32, errCode uint32) []byte {
 	frame := make([]byte, FrameHeaderLen+4)
 	frame[0] = 0
@@ -311,34 +309,34 @@ func RSTStreamFrame(streamID uint32, errCode uint32) []byte {
 	return frame
 }
 
-// Engine manages the H2 framing layer over ChimneyRecords.
+// Engine 管理 ChimneyRecord 上的 H2 帧层。
 type Engine struct {
 	settings    *Settings
 	recordCodec *record.Codec
 
-	// Stream state
+	// 流状态
 	nextStreamID uint32
 	streams      map[uint32]*Stream
 	mu           sync.RWMutex
 
-	// For reading/writing records
+	// 读写记录
 	recordReader *record.RecordReader
 	recordWriter *record.RecordWriter
 
-	// Internal buffer for frame accumulation
+	// 用于帧累积的内部缓冲区
 	readBuf  []byte
 	writeBuf []byte
 }
 
-// Stream represents an H2 stream within the tunnel.
+// Stream 表示隧道内的 H2 流。
 type Stream struct {
 	ID         uint32
 	State      StreamState
-	Window     int32 // Flow control window
+	Window     int32 // 流控窗口
 	RecvWindow int32
 }
 
-// StreamState represents the state of an H2 stream.
+// StreamState 表示 H2 流的状态。
 type StreamState uint8
 
 const (
@@ -349,7 +347,7 @@ const (
 	StreamClosed
 )
 
-// NewEngine creates a new H2 engine with the given settings and record codec.
+// NewEngine 使用给定的设置和记录编解码器创建新的 H2 引擎。
 func NewEngine(settings *Settings, codec *record.Codec) *Engine {
 	if settings == nil {
 		settings = DefaultSettings()
@@ -357,7 +355,7 @@ func NewEngine(settings *Settings, codec *record.Codec) *Engine {
 	e := &Engine{
 		settings:     settings,
 		recordCodec:  codec,
-		nextStreamID: 1, // Client-initiated streams start at 1
+		nextStreamID: 1, // 客户端发起的流从 1 开始
 		streams:      make(map[uint32]*Stream),
 		readBuf:      make([]byte, 0, DefaultMaxFrameSize*2),
 		writeBuf:     make([]byte, 0, DefaultMaxFrameSize*2),
@@ -365,14 +363,14 @@ func NewEngine(settings *Settings, codec *record.Codec) *Engine {
 	return e
 }
 
-// SetRecordIO sets the record reader and writer for frame I/O.
+// SetRecordIO 设置用于帧 I/O 的记录读取器和写入器。
 func (e *Engine) SetRecordIO(reader *record.RecordReader, writer *record.RecordWriter) {
 	e.recordReader = reader
 	e.recordWriter = writer
 }
 
-// CodecSeqs returns the current sealer and opener sequence numbers from the
-// underlying record codec. Used for diagnostics during tunnel failures.
+// CodecSeqs 返回底层记录编解码器的当前密封器和开启器序列号。
+// 用于隧道故障期间的诊断。
 func (e *Engine) CodecSeqs() (sealerSeq, openerSeq uint64) {
 	if e.recordCodec == nil {
 		return 0, 0
@@ -380,7 +378,7 @@ func (e *Engine) CodecSeqs() (sealerSeq, openerSeq uint64) {
 	return e.recordCodec.SealerSeq(), e.recordCodec.OpenerSeq()
 }
 
-// CodecTrails returns the sealer and opener operation trails for diagnostics.
+// CodecTrails 返回密封器和开启器的操作轨迹，用于诊断。
 func (e *Engine) CodecTrails() (sealerTrail, openerTrail string) {
 	if e.recordCodec == nil {
 		return "(no codec)", "(no codec)"
@@ -388,17 +386,17 @@ func (e *Engine) CodecTrails() (sealerTrail, openerTrail string) {
 	return e.recordCodec.SealerTrail(), e.recordCodec.OpenerTrail()
 }
 
-// InitiateAsClient performs the client-side H2 opening sequence:
-//   1. Send preface + SETTINGS
-//   2. Receive server SETTINGS
-//   3. Send SETTINGS ACK
-//   4. Receive SETTINGS ACK
+// InitiateAsClient 执行客户端侧 H2 开启序列：
+//   1. 发送前导 + SETTINGS
+//   2. 接收服务器 SETTINGS
+//   3. 发送 SETTINGS ACK
+//   4. 接收 SETTINGS ACK
 func (e *Engine) InitiateAsClient() error {
 	if e.recordWriter == nil {
 		return errors.New("h2engine: record writer not set")
 	}
 
-	// Step 1: Send preface + SETTINGS
+	// 步骤 1：发送前导 + SETTINGS
 	preface := []byte(H2ConnectionPreface)
 	settingsFrame := e.settings.EncodeSettings(false)
 
@@ -410,25 +408,25 @@ func (e *Engine) InitiateAsClient() error {
 		return fmt.Errorf("h2engine: failed to send preface+SETTINGS: %w", err)
 	}
 
-	// Step 2: Receive server SETTINGS
-	// (This would be handled by the event loop; simplified here)
+	// 步骤 2：接收服务器 SETTINGS
+	//（这应由事件循环处理；此处简化）
 
-	// Step 3 & 4: ACKs would be exchanged
+	// 步骤 3 和 4：交换 ACK
 	return nil
 }
 
-// AcceptAsServer performs the server-side H2 opening sequence:
-//   1. Read and validate client preface
-//   2. Read client SETTINGS
-//   3. Send server SETTINGS
-//   4. Send SETTINGS ACK
-//   5. Read client SETTINGS ACK
+// AcceptAsServer 执行服务器侧 H2 开启序列：
+//   1. 读取并验证客户端前导
+//   2. 读取客户端 SETTINGS
+//   3. 发送服务器 SETTINGS
+//   4. 发送 SETTINGS ACK
+//   5. 读取客户端 SETTINGS ACK
 func (e *Engine) AcceptAsServer() error {
 	if e.recordReader == nil {
 		return errors.New("h2engine: record reader not set")
 	}
 
-	// Step 1: Read preface + first SETTINGS (they come in one record typically)
+	// 步骤 1：读取前导和第一个 SETTINGS（它们通常在一个记录中一起到达）
 	data, err := e.recordReader.ReadRecord()
 	if err != nil {
 		return fmt.Errorf("h2engine: failed to read client preface: %w", err)
@@ -443,11 +441,11 @@ func (e *Engine) AcceptAsServer() error {
 		return ErrInvalidPreface
 	}
 
-	// Remaining data after preface is the client's SETTINGS frame
+	// 前导之后的数据是客户端的 SETTINGS 帧
 	remaining := data[len(H2ConnectionPreface):]
 
-	// Parse client SETTINGS and respect MAX_FRAME_SIZE: the relay must not send
-	// frames larger than the client's advertised maximum.
+	// 解析客户端 SETTINGS 并尊重 MAX_FRAME_SIZE：中继节点不得发送
+	// 超过客户端通告最大值的帧。
 	if len(remaining) >= FrameHeaderLen {
 		fh, err := DecodeFrameHeader(remaining)
 		if err == nil && fh.Type == FrameSettings && len(remaining) >= FrameHeaderLen+int(fh.Length) {
@@ -458,13 +456,13 @@ func (e *Engine) AcceptAsServer() error {
 		}
 	}
 
-	// Step 3: Send server SETTINGS
+	// 步骤 3：发送服务器 SETTINGS
 	settingsFrame := e.settings.EncodeSettings(false)
 	if err := e.recordWriter.WriteRecord(settingsFrame); err != nil {
 		return fmt.Errorf("h2engine: failed to send server SETTINGS: %w", err)
 	}
 
-	// Step 4: Send SETTINGS ACK
+	// 步骤 4：发送 SETTINGS ACK
 	ackFrame := e.settings.EncodeSettings(true)
 	if err := e.recordWriter.WriteRecord(ackFrame); err != nil {
 		return fmt.Errorf("h2engine: failed to send SETTINGS ACK: %w", err)
@@ -473,14 +471,14 @@ func (e *Engine) AcceptAsServer() error {
 	return nil
 }
 
-// OpenStream opens a new stream for sending data.
-// Returns the stream ID.
+// OpenStream 打开一个新的用于发送数据的流。
+// 返回流 ID。
 func (e *Engine) OpenStream() uint32 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	streamID := e.nextStreamID
-	e.nextStreamID += 2 // Client-initiated streams are odd
+	e.nextStreamID += 2 // 客户端发起的流为奇数
 
 	initialWindow := int32(65535)
 	if e.settings.InitialWindowSize != nil {
@@ -497,8 +495,8 @@ func (e *Engine) OpenStream() uint32 {
 	return streamID
 }
 
-// WriteData writes data as DATA frames on the given stream.
-// Data is automatically fragmented according to MaxFrameSize.
+// WriteData 在指定流上将数据写入为 DATA 帧。
+// 数据会根据 MaxFrameSize 自动分片。
 func (e *Engine) WriteData(streamID uint32, data []byte, endStream bool) error {
 	e.mu.Lock()
 	stream, exists := e.streams[streamID]
@@ -522,7 +520,7 @@ func (e *Engine) WriteData(streamID uint32, data []byte, endStream bool) error {
 	maxFrameSize := e.settings.MaxFrameSizeActual
 	e.mu.Unlock()
 
-	// Fragment data into frames (I/O outside lock)
+	// 将数据分片为帧（I/O 在锁外进行）
 	offset := 0
 	for offset < len(data) {
 		chunkSize := int(maxFrameSize)
@@ -553,9 +551,9 @@ func (e *Engine) WriteData(streamID uint32, data []byte, endStream bool) error {
 	return nil
 }
 
-// WriteRawFrame writes a pre-built frame directly to the record layer.
-// Unlike WriteData, this does not wrap the data in a DATA frame — it sends
-// the bytes as-is. Use for control frames (RST_STREAM, GOAWAY, etc.).
+// WriteRawFrame 将预构建的帧直接写入记录层。
+// 与 WriteData 不同，它不将数据包裹在 DATA 帧中——
+// 它按原样发送字节。用于控制帧（RST_STREAM、GOAWAY 等）。
 func (e *Engine) WriteRawFrame(frame []byte) error {
 	if e.recordWriter == nil {
 		return errors.New("h2engine: record writer not set")
@@ -563,14 +561,13 @@ func (e *Engine) WriteRawFrame(frame []byte) error {
 	return e.recordWriter.WriteRecord(frame)
 }
 
-// WritePaddedRecord writes tunnel data as a DATA frame, optionally appending
-// a padding DATA frame so the combined plaintext reaches targetSize bytes.
+// WritePaddedRecord 将隧道数据写入 DATA 帧，可选地附加填充 DATA 帧，
+// 使得合并后的明文达到 targetSize 字节。
 //
-// This produces a single ChimneyRecord containing both frames, matching the
-// target size from the traffic profile. If the tunnel DATA frame alone is
-// already >= targetSize, no padding is added.
+// 这会生成一个包含两个帧的单个 ChimneyRecord，匹配流量配置文件的
+// 目标大小。如果隧道 DATA 帧本身已 >= targetSize，则不添加填充。
 //
-// The relay silently discards frames on PaddingStreamID.
+// 中继节点静默丢弃 PaddingStreamID 上的帧。
 func (e *Engine) WritePaddedRecord(streamID uint32, data []byte, targetSize uint16, endStream bool) error {
 	if e.recordWriter == nil {
 		return errors.New("h2engine: record writer not set")
@@ -583,21 +580,21 @@ func (e *Engine) WritePaddedRecord(streamID uint32, data []byte, targetSize uint
 	tunnelFrame := DataFrame(streamID, flags, data)
 
 	if len(tunnelFrame) >= int(targetSize) {
-		// Tunnel data fills target on its own — no padding needed
+		// 隧道数据自身已达到目标大小——无需填充
 		return e.recordWriter.WriteRecord(tunnelFrame)
 	}
 
-	// Build padding frame to reach target size
+	// 构建填充帧以达到目标大小
 	padLen := int(targetSize) - len(tunnelFrame) - FrameHeaderLen
 	if padLen <= 0 {
-		// Not enough room for a meaningful padding frame; send tunnel data as-is
+		// 没有足够的空间用于有意义的填充帧；按原样发送隧道数据
 		return e.recordWriter.WriteRecord(tunnelFrame)
 	}
 
 	paddingPayload := make([]byte, padLen)
 	paddingFrame := DataFrame(PaddingStreamID, 0, paddingPayload)
 
-	// Combine both frames into one record
+	// 将两个帧合并为一个记录
 	combined := make([]byte, len(tunnelFrame)+len(paddingFrame))
 	copy(combined, tunnelFrame)
 	copy(combined[len(tunnelFrame):], paddingFrame)
@@ -605,8 +602,8 @@ func (e *Engine) WritePaddedRecord(streamID uint32, data []byte, targetSize uint
 	return e.recordWriter.WriteRecord(combined)
 }
 
-// WritePadding sends a standalone padding record filled to targetSize.
-// Used during idle periods to maintain traffic appearance.
+// WritePadding 发送一个独立的填充记录，填充至 targetSize。
+// 在空闲期间用于维持流量外观。
 func (e *Engine) WritePadding(targetSize uint16) error {
 	if e.recordWriter == nil {
 		return errors.New("h2engine: record writer not set")
@@ -614,16 +611,16 @@ func (e *Engine) WritePadding(targetSize uint16) error {
 
 	padPayloadLen := int(targetSize) - FrameHeaderLen
 	if padPayloadLen <= 0 {
-		padPayloadLen = 64 // minimal padding
+		padPayloadLen = 64 // 最小填充量
 	}
 	payload := make([]byte, padPayloadLen)
 	frame := DataFrame(PaddingStreamID, 0, payload)
 	return e.recordWriter.WriteRecord(frame)
 }
 
-// WriteCombinedRecord writes multiple H2 frames as a single ChimneyRecord.
-// This is the low-level building block for padding — the caller assembles
-// a tunnel DATA frame and a padding DATA frame, then writes them together.
+// WriteCombinedRecord 将多个 H2 帧写入单个 ChimneyRecord。
+// 这是填充的底层构建块——调用者组装隧道 DATA 帧和填充 DATA 帧，
+// 然后将它们一起写入。
 func (e *Engine) WriteCombinedRecord(frames ...[]byte) error {
 	if e.recordWriter == nil {
 		return errors.New("h2engine: record writer not set")
@@ -641,27 +638,26 @@ func (e *Engine) WriteCombinedRecord(frames ...[]byte) error {
 	return e.recordWriter.WriteRecord(combined)
 }
 
-// IsPaddingStream returns true if the stream ID is the reserved padding stream.
-// Used by the relay to filter out padding frames before dispatching.
+// IsPaddingStream 返回流 ID 是否为保留的填充流。
+// 中继节点在分发前使用此函数过滤掉填充帧。
 func IsPaddingStream(streamID uint32) bool {
 	return streamID == PaddingStreamID
 }
 
-// IsDilutionStream returns true if the stream ID is the reserved dilution stream.
+// IsDilutionStream 返回流 ID 是否为保留的稀释流。
 func IsDilutionStream(streamID uint32) bool {
 	return streamID == DilutionStreamID
 }
 
-// IsReservedStream returns true for any reserved (non-tunnel) stream ID.
-// Used by the relay to discard padding and dilution frames.
+// IsReservedStream 返回任何保留（非隧道）流 ID 是否为真。
+// 中继节点用于丢弃填充和稀释帧。
 func IsReservedStream(streamID uint32) bool {
 	return IsPaddingStream(streamID) || IsDilutionStream(streamID)
 }
 
-// WriteDilutionRecord writes a pre-recorded content block as a dilution DATA
-// frame combined with padding to reach targetSize in a single ChimneyRecord.
-// The dilution frame carries semantic content (looks like a real HTTP response),
-// not random bytes.
+// WriteDilutionRecord 将预录的内容块作为稀释 DATA 帧写入，
+// 与填充合并以在单个 ChimneyRecord 中达到 targetSize。
+// 稀释帧携带语义内容（看起来像真实的 HTTP 响应），而不是随机字节。
 func (e *Engine) WriteDilutionRecord(content []byte, targetSize uint16) error {
 	if e.recordWriter == nil {
 		return errors.New("h2engine: record writer not set")
@@ -673,7 +669,7 @@ func (e *Engine) WriteDilutionRecord(content []byte, targetSize uint16) error {
 		return e.recordWriter.WriteRecord(dilutionFrame)
 	}
 
-	// Pad with padding stream data to reach target
+	// 使用填充流数据填充以达到目标
 	padLen := int(targetSize) - len(dilutionFrame) - FrameHeaderLen
 	if padLen <= 0 {
 		return e.recordWriter.WriteRecord(dilutionFrame)
@@ -689,11 +685,11 @@ func (e *Engine) WriteDilutionRecord(content []byte, targetSize uint16) error {
 	return e.recordWriter.WriteRecord(combined)
 }
 
-// ReadFrame reads and returns the next H2 frame from the record stream.
-// Returns (header, payload, error).
+// ReadFrame 从记录流中读取并返回下一个 H2 帧。
+// 返回（header, payload, error）。
 func (e *Engine) ReadFrame() (*FrameHeader, []byte, error) {
 	for {
-		// Try to parse a frame from readBuf
+		// 尝试从 readBuf 解析一个帧
 		e.mu.Lock()
 		if len(e.readBuf) >= FrameHeaderLen {
 			fh, err := DecodeFrameHeader(e.readBuf)
@@ -718,7 +714,7 @@ func (e *Engine) ReadFrame() (*FrameHeader, []byte, error) {
 		}
 		e.mu.Unlock()
 
-		// Need more data — I/O outside lock
+		// 需要更多数据——I/O 在锁外进行
 		record, err := e.recordReader.ReadRecord()
 		if err != nil {
 			return nil, nil, err
@@ -729,9 +725,9 @@ func (e *Engine) ReadFrame() (*FrameHeader, []byte, error) {
 	}
 }
 
-// GenerateClientOpeningSequence generates the complete client opening sequence
-// as it would appear after the swap (preface + SETTINGS + ACKs).
-// This is used by the client to produce the initial records.
+// GenerateClientOpeningSequence 生成交换后出现的完整客户端开启序列
+//（前导 + SETTINGS + ACK）。
+// 客户端使用此函数产生初始记录。
 func GenerateClientOpeningSequence(settings *Settings) []byte {
 	var buf bytes.Buffer
 	buf.WriteString(H2ConnectionPreface)
@@ -739,8 +735,8 @@ func GenerateClientOpeningSequence(settings *Settings) []byte {
 	return buf.Bytes()
 }
 
-// GenerateServerOpeningSequence generates the server-side opening sequence
-// (SETTINGS + ACK).
+// GenerateServerOpeningSequence 生成服务器侧开启序列
+//（SETTINGS + ACK）。
 func GenerateServerOpeningSequence(settings *Settings) []byte {
 	var buf bytes.Buffer
 	buf.Write(settings.EncodeSettings(false))
@@ -748,9 +744,8 @@ func GenerateServerOpeningSequence(settings *Settings) []byte {
 	return buf.Bytes()
 }
 
-// ParsePrefaceAndSettings parses the client preface and initial SETTINGS from
-// the first record payload after swap.
-// Returns (settings map, remaining data, error).
+// ParsePrefaceAndSettings 从交换后的第一个记录负载中解析客户端前导和初始 SETTINGS。
+// 返回（settings map, remaining data, error）。
 func ParsePrefaceAndSettings(data []byte) (map[uint16]uint32, []byte, error) {
 	if len(data) < len(H2ConnectionPreface) {
 		return nil, nil, ErrInvalidPreface
@@ -785,28 +780,28 @@ func ParsePrefaceAndSettings(data []byte) (map[uint16]uint32, []byte, error) {
 	return settings, afterSettings, nil
 }
 
-// StreamManager handles stream lifecycle for the H2 engine.
+// StreamManager 管理 H2 引擎的流生命周期。
 type StreamManager struct {
 	streams      map[uint32]*Stream
 	nextStreamID uint32
 	mu           sync.RWMutex
 }
 
-// NewStreamManager creates a new StreamManager.
-// isServer: if true, server-initiated streams (even IDs) are used.
+// NewStreamManager 创建一个新的 StreamManager。
+// isServer：如果为 true，则使用服务器发起的流（偶数 ID）。
 func NewStreamManager(isServer bool) *StreamManager {
 	sm := &StreamManager{
 		streams: make(map[uint32]*Stream),
 	}
 	if isServer {
-		sm.nextStreamID = 2 // Server-initiated streams are even
+		sm.nextStreamID = 2 // 服务器发起的流为偶数
 	} else {
-		sm.nextStreamID = 1 // Client-initiated streams are odd
+		sm.nextStreamID = 1 // 客户端发起的流为奇数
 	}
 	return sm
 }
 
-// CreateStream opens a new stream.
+// CreateStream 打开一个新的流。
 func (sm *StreamManager) CreateStream(initialWindow int32) *Stream {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -822,7 +817,7 @@ func (sm *StreamManager) CreateStream(initialWindow int32) *Stream {
 	return stream
 }
 
-// GetStream returns a stream by ID.
+// GetStream 按 ID 返回一个流。
 func (sm *StreamManager) GetStream(id uint32) (*Stream, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -830,7 +825,7 @@ func (sm *StreamManager) GetStream(id uint32) (*Stream, bool) {
 	return s, ok
 }
 
-// CloseStream closes a stream.
+// CloseStream 关闭一个流。
 func (sm *StreamManager) CloseStream(id uint32) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -839,7 +834,7 @@ func (sm *StreamManager) CloseStream(id uint32) {
 	}
 }
 
-// WindowUpdate applies a window update to a stream.
+// WindowUpdate 对流应用窗口更新。
 func (sm *StreamManager) WindowUpdate(id uint32, increment uint32) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

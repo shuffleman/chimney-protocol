@@ -1,17 +1,17 @@
-// cmd/calibrate is a tool for calibrating site traffic profiles.
+// cmd/calibrate 是用于校准站点流量配置文件的工具。
 //
-// Usage:
+// 用法：
 //
 //	calibrate -pcap capture.pcap -site example.com -output profiles/
 //
-// This tool analyzes pcap captures of real HTTPS traffic and generates:
-//  1. SETTINGS snapshot for the site
-//  2. Traffic profile model (size/burst/gap/direction distributions)
+// 该工具分析真实 HTTPS 流量的 pcap 抓包文件，并生成：
+//  1. 该站点的 SETTINGS 快照
+//  2. 流量配置文件模型（大小/突发/间隔/方向分布）
 //
-// Both outputs are required for proper traffic shaping.
+// 两个输出对于正确的流量整形都是必需的。
 //
-// For SETTINGS extraction, the tool supports NSS SSLKEYLOGFILE format for
-// decrypting TLS traffic:
+// 对于 SETTINGS 提取，该工具支持 NSS SSLKEYLOGFILE 格式
+// 用于解密 TLS 流量：
 //
 //	calibrate -pcap capture.pcap -site example.com -keylog sslkeylog.txt
 package main
@@ -113,12 +113,12 @@ func main() {
 		*settings.MaxFrameSize, *settings.MaxHeaderListSize)
 }
 
-// extractSettingsFromPcap extracts HTTP/2 SETTINGS from a pcap file.
+// extractSettingsFromPcap 从 pcap 文件中提取 HTTP/2 SETTINGS。
 //
-// Strategy (in priority order):
-//  1. If keylog file provided, attempt to decrypt and parse H2 frames
-//  2. Heuristic: analyze sizes of early app-data records to guess SETTINGS
-//  3. Fall back to defaults
+// 策略（按优先级顺序）：
+//  1. 如果提供了 keylog 文件，尝试解密并解析 H2 帧
+//  2. 启发式方法：分析早期应用数据记录的大小来推测 SETTINGS
+//  3. 回退到默认值
 func extractSettingsFromPcap(pcapFile string, serverPort uint16, keylogFile string) (*h2engine.Settings, error) {
 	fs, err := pcap.ReassembleStreams(pcapFile, serverPort)
 	if err != nil {
@@ -130,11 +130,11 @@ func extractSettingsFromPcap(pcapFile string, serverPort uint16, keylogFile stri
 		baseTime = fs.ClientTimestamps[0]
 	}
 
-	// Extract TLS records from both directions
+	// 从两个方向提取 TLS 记录
 	clientRecords := pcap.ExtractTLSRecords(fs.ClientToServer, pcap.DirClientToServer, baseTime, fs.ClientTimestamps)
 	_ = pcap.ExtractTLSRecords(fs.ServerToClient, pcap.DirServerToClient, baseTime, fs.ServerTimestamps)
 
-	// Find client application_data records (post-handshake)
+	// 查找客户端应用数据记录（握手后）
 	var appDataRecords []pcap.TLSRecord
 	for _, rec := range clientRecords {
 		if rec.ContentType == pcap.TLSRecordApplicationData {
@@ -142,7 +142,7 @@ func extractSettingsFromPcap(pcapFile string, serverPort uint16, keylogFile stri
 		}
 	}
 
-	// If we have a keylog, attempt decryption
+	// 如果有 keylog，尝试解密
 	if keylogFile != "" && len(appDataRecords) > 0 {
 		settings, err := extractSettingsWithKeylog(fs, appDataRecords, keylogFile)
 		if err == nil {
@@ -151,11 +151,11 @@ func extractSettingsFromPcap(pcapFile string, serverPort uint16, keylogFile stri
 		fmt.Printf("Keylog decryption failed (%v), falling back to heuristic.\n", err)
 	}
 
-	// Heuristic: estimate from record sizes
+	// 启发式方法：根据记录大小估算
 	return heuristicSettings(appDataRecords), nil
 }
 
-// extractSettingsWithKeylog attempts to decrypt TLS and parse H2 SETTINGS.
+// extractSettingsWithKeylog 尝试解密 TLS 并解析 H2 SETTINGS。
 func extractSettingsWithKeylog(fs *pcap.FilteredStream, appDataRecords []pcap.TLSRecord, keylogFile string) (*h2engine.Settings, error) {
 	entries, err := pcap.ParseNSSKeyLog(keylogFile)
 	if err != nil {
@@ -163,7 +163,7 @@ func extractSettingsWithKeylog(fs *pcap.FilteredStream, appDataRecords []pcap.TL
 	}
 	_ = entries
 
-	// Extract ClientRandom from the ClientHello
+	// 从 ClientHello 中提取 ClientRandom
 	clientRandom, err := findClientRandom(fs.ClientToServer)
 	if err != nil {
 		return nil, fmt.Errorf("find ClientRandom: %w", err)
@@ -171,12 +171,12 @@ func extractSettingsWithKeylog(fs *pcap.FilteredStream, appDataRecords []pcap.TL
 	_ = clientRandom
 	_ = appDataRecords
 
-	// Full TLS 1.3 decryption requires implementing HKDF key schedule.
-	// For now, this is a forward-looking hook.
+	// 完整的 TLS 1.3 解密需要实现 HKDF 密钥调度。
+	// 目前，这是一个前瞻性钩子。
 	return nil, fmt.Errorf("TLS decryption not yet implemented: %d keylog entries loaded, ClientRandom extracted", len(entries))
 }
 
-// findClientRandom scans the client→server stream for a ClientHello and extracts ClientRandom.
+// findClientRandom 扫描客户端→服务器流中的 ClientHello 并提取 ClientRandom。
 func findClientRandom(stream []byte) ([]byte, error) {
 	records := pcap.ExtractTLSRecords(stream, pcap.DirClientToServer, time.Now(), nil)
 	for _, rec := range records {
@@ -191,18 +191,18 @@ func findClientRandom(stream []byte) ([]byte, error) {
 	return nil, fmt.Errorf("no ClientHello found in stream")
 }
 
-// heuristicSettings estimates H2 SETTINGS from app-data record sizes.
+// heuristicSettings 从应用数据记录大小估算 H2 SETTINGS。
 //
-// The first app-data record after handshake typically contains:
+// 第一个应用数据记录（握手后）通常包含：
 //
-//	H2 Preface (24 bytes) + SETTINGS frame header (9 bytes) + settings params
+//	H2 前言（24 字节）+ SETTINGS 帧头（9 字节）+ 设置参数
 //
-// TLS 1.2 GCM: record_overhead = 8 (explicit nonce) + 16 (tag) = 24 bytes
-// TLS 1.3: record_overhead = 1 (inner content type) + 16 (tag) = 17 bytes
+// TLS 1.2 GCM：记录开销 = 8（显式 nonce）+ 16（标签）= 24 字节
+// TLS 1.3：记录开销 = 1（内部内容类型）+ 16（标签）= 17 字节
 //
-// So: plaintext = record_length - overhead
+// 因此：明文 = 记录长度 - 开销
 //
-//	settings_params_len = plaintext - 24 (preface) - 9 (frame header)
+//	settings_params_len = 明文 - 24（前言）- 9（帧头）
 //	num_settings = settings_params_len / 6
 func heuristicSettings(records []pcap.TLSRecord) *h2engine.Settings {
 	if len(records) == 0 {
@@ -210,7 +210,7 @@ func heuristicSettings(records []pcap.TLSRecord) *h2engine.Settings {
 		return h2engine.DefaultSettings()
 	}
 
-	// Look at early records
+	// 查看早期记录
 	var sizes []int
 	for i, rec := range records {
 		if i >= 5 {
@@ -221,7 +221,7 @@ func heuristicSettings(records []pcap.TLSRecord) *h2engine.Settings {
 		fmt.Printf("  Early record %d: TLS length=%d, est. plaintext=%d bytes\n", i+1, rec.Length, plainSize)
 	}
 
-	// The first record should contain H2 preface + SETTINGS
+	// 第一个记录应包含 H2 前言 + SETTINGS
 	if len(sizes) > 0 && sizes[0] > 0 {
 		settingsPayloadLen := sizes[0] - 24 - 9 // preface - frame header
 		if settingsPayloadLen > 0 && settingsPayloadLen%6 == 0 {
@@ -242,10 +242,10 @@ func heuristicSettings(records []pcap.TLSRecord) *h2engine.Settings {
 	return h2engine.DefaultSettings()
 }
 
-// extractProfileFromPcap extracts traffic profile from a pcap file.
+// extractProfileFromPcap 从 pcap 文件中提取流量配置文件。
 //
-// This works without TLS decryption — it analyzes plaintext TLS record headers
-// for size, timing, and direction.
+// 这不需要 TLS 解密——它分析明文 TLS 记录头
+// 的大小、时序和方向。
 func extractProfileFromPcap(pcapFile, siteName string, serverPort uint16) (*profile.Model, error) {
 	fs, err := pcap.ReassembleStreams(pcapFile, serverPort)
 	if err != nil {
@@ -261,11 +261,11 @@ func extractProfileFromPcap(pcapFile, siteName string, serverPort uint16) (*prof
 		baseTime = fs.ClientTimestamps[0]
 	}
 
-	// Extract TLS records from both directions
+	// 从两个方向提取 TLS 记录
 	clientRecords := pcap.ExtractTLSRecords(fs.ClientToServer, pcap.DirClientToServer, baseTime, fs.ClientTimestamps)
 	serverRecords := pcap.ExtractTLSRecords(fs.ServerToClient, pcap.DirServerToClient, baseTime, fs.ServerTimestamps)
 
-	// Filter to application_data only (what matters for traffic profile)
+	// 筛选出应用数据记录（对流量配置重要）
 	var appDataRecords []pcap.TLSRecord
 	for _, rec := range clientRecords {
 		if rec.ContentType == pcap.TLSRecordApplicationData {
@@ -283,7 +283,7 @@ func extractProfileFromPcap(pcapFile, siteName string, serverPort uint16) (*prof
 		return profile.DefaultModel(), nil
 	}
 
-	// Sort by timestamp
+	// 按时间戳排序
 	sort.Slice(appDataRecords, func(i, j int) bool {
 		return appDataRecords[i].Timestamp.Before(appDataRecords[j].Timestamp)
 	})
@@ -293,7 +293,7 @@ func extractProfileFromPcap(pcapFile, siteName string, serverPort uint16) (*prof
 		countDirection(appDataRecords, pcap.DirClientToServer),
 		countDirection(appDataRecords, pcap.DirServerToClient))
 
-	// Extract record sizes
+	// 提取记录大小
 	var sizes []uint16
 	var uplinkSizes []uint16
 	for _, rec := range appDataRecords {
@@ -303,7 +303,7 @@ func extractProfileFromPcap(pcapFile, siteName string, serverPort uint16) (*prof
 		}
 	}
 
-	// Detect bursts: consecutive records with inter-record gap < threshold
+	// 检测突发：连续记录之间间隔小于阈值
 	burstThreshold := 50 * time.Millisecond
 	bursts := detectBursts(appDataRecords, burstThreshold)
 
@@ -312,7 +312,7 @@ func extractProfileFromPcap(pcapFile, siteName string, serverPort uint16) (*prof
 		burstSizes = append(burstSizes, uint16(len(b)))
 	}
 
-	// Compute inter-burst gaps
+	// 计算突发间间隔
 	gaps := computeInterBurstGaps(appDataRecords, burstThreshold)
 
 	fmt.Printf("Detected %d bursts (threshold=%v)\n", len(bursts), burstThreshold)
@@ -325,11 +325,11 @@ func extractProfileFromPcap(pcapFile, siteName string, serverPort uint16) (*prof
 			minDuration(gaps), maxDuration(gaps), meanDuration(gaps))
 	}
 
-	// Compute direction ratio
+	// 计算方向比例
 	uplinkRatio := float64(len(uplinkSizes)) / float64(len(appDataRecords))
 	fmt.Printf("Uplink ratio: %.2f\n", uplinkRatio)
 
-	// Fit intra-burst pacing
+	// 拟合突发内间隔
 	var intraBurstGaps []time.Duration
 	for _, burst := range bursts {
 		for i := 1; i < len(burst); i++ {
@@ -359,10 +359,10 @@ func extractProfileFromPcap(pcapFile, siteName string, serverPort uint16) (*prof
 	return model, nil
 }
 
-// burst represents a consecutive sequence of records within a time window.
+// burst 表示时间窗口内的一组连续记录。
 type burst []pcap.TLSRecord
 
-// detectBursts groups records into bursts where inter-record gaps are < threshold.
+// detectBursts 将记录分组为突发，其中记录间间隔小于阈值。
 func detectBursts(records []pcap.TLSRecord, threshold time.Duration) []burst {
 	if len(records) == 0 {
 		return nil
@@ -384,7 +384,7 @@ func detectBursts(records []pcap.TLSRecord, threshold time.Duration) []burst {
 	return bursts
 }
 
-// computeInterBurstGaps computes the gaps between bursts.
+// computeInterBurstGaps 计算突发之间的间隔。
 func computeInterBurstGaps(records []pcap.TLSRecord, threshold time.Duration) []time.Duration {
 	var gaps []time.Duration
 	for i := 1; i < len(records); i++ {
@@ -396,7 +396,7 @@ func computeInterBurstGaps(records []pcap.TLSRecord, threshold time.Duration) []
 	return gaps
 }
 
-// countDirection counts records matching a direction.
+// countDirection 统计匹配某个方向的记录数。
 func countDirection(records []pcap.TLSRecord, dir int) int {
 	n := 0
 	for _, r := range records {
@@ -407,7 +407,7 @@ func countDirection(records []pcap.TLSRecord, dir int) int {
 	return n
 }
 
-// fitSizeDist fits a SizeDistribution from sizes.
+// fitSizeDist 根据大小列表拟合 SizeDistribution。
 func fitSizeDist(sizes []uint16) *profile.SizeDistribution {
 	if len(sizes) == 0 {
 		return &profile.SizeDistribution{Min: 128, Max: 16384, Mean: 8.0, StdDev: 1.2}
@@ -437,7 +437,7 @@ func fitSizeDist(sizes []uint16) *profile.SizeDistribution {
 	}
 	stddev := math.Sqrt(sumSq / float64(len(sizes)))
 
-	// Build histogram buckets (256-byte granularity)
+	// 构建直方图桶（256 字节粒度）
 	bucketMap := make(map[uint16]uint32)
 	for _, s := range sizes {
 		bucket := (s + 128) / 256 * 256
@@ -466,7 +466,7 @@ func fitSizeDist(sizes []uint16) *profile.SizeDistribution {
 	}
 }
 
-// fitBurstDist fits a BurstDistribution.
+// fitBurstDist 拟合 BurstDistribution。
 func fitBurstDist(burstSizes []uint16) *profile.BurstDistribution {
 	if len(burstSizes) == 0 {
 		return &profile.BurstDistribution{Min: 2, Max: 20, Mean: 6, StdDev: 2}
@@ -501,7 +501,7 @@ func fitBurstDist(burstSizes []uint16) *profile.BurstDistribution {
 	}
 }
 
-// fitGapDist fits a GapDistribution.
+// fitGapDist 拟合 GapDistribution。
 func fitGapDist(gaps []time.Duration) *profile.GapDistribution {
 	if len(gaps) == 0 {
 		return &profile.GapDistribution{
@@ -539,7 +539,7 @@ func fitGapDist(gaps []time.Duration) *profile.GapDistribution {
 	}
 }
 
-// fitIntraBurstPacing fits IntraBurstPacing from within-burst record gaps.
+// fitIntraBurstPacing 根据突发内记录间隔拟合 IntraBurstPacing。
 func fitIntraBurstPacing(gaps []time.Duration) *profile.IntraBurstPacing {
 	if len(gaps) == 0 {
 		return &profile.IntraBurstPacing{
@@ -577,7 +577,7 @@ func fitIntraBurstPacing(gaps []time.Duration) *profile.IntraBurstPacing {
 	}
 }
 
-// Helper functions.
+// 辅助函数。
 func minU16(vals []uint16) uint16 {
 	if len(vals) == 0 {
 		return 0
@@ -652,7 +652,7 @@ func meanDuration(vals []time.Duration) time.Duration {
 	return time.Duration(sum / int64(len(vals)))
 }
 
-// saveSettings saves SETTINGS to a JSON file.
+// saveSettings 将 SETTINGS 保存到 JSON 文件。
 func saveSettings(settings *h2engine.Settings, path string) error {
 	data := map[string]interface{}{
 		"HEADER_TABLE_SIZE":      *settings.HeaderTableSize,

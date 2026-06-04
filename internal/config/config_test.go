@@ -263,7 +263,7 @@ func TestSaveRelayConfig(t *testing.T) {
 		t.Fatalf("SaveRelayConfig failed: %v", err)
 	}
 
-	// Verify file exists and is readable
+	// 验证文件存在且可读
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("Failed to read saved config: %v", err)
@@ -272,7 +272,7 @@ func TestSaveRelayConfig(t *testing.T) {
 		t.Error("Saved config is empty")
 	}
 
-	// Load it back
+	// 重新加载
 	loaded, err := LoadRelayConfig(configPath)
 	if err != nil {
 		t.Fatalf("LoadRelayConfig on saved file failed: %v", err)
@@ -343,7 +343,7 @@ func TestSaveClientConfig(t *testing.T) {
 }
 
 func TestConfig_DefaultTimeouts(t *testing.T) {
-	// When timeouts are zero, validation should set defaults
+	// 当超时时间为零时，验证应设置默认值
 	c := &RelayConfig{
 		ListenAddr:  ":443",
 		PSK:         "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678",
@@ -351,12 +351,12 @@ func TestConfig_DefaultTimeouts(t *testing.T) {
 		CloudRegion: "us-east-1",
 	}
 
-	// Before validation, timeouts are zero
+	// 验证前，超时时间为零
 	if c.HandshakeTimeout != 0 {
 		t.Error("HandshakeTimeout should be zero before validation")
 	}
 
-	// After validation, defaults are set
+	// 验证后，设置默认值
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate failed: %v", err)
 	}

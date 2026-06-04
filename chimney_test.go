@@ -64,7 +64,7 @@ func TestParseFingerprint_CaseInsensitive(t *testing.T) {
 }
 
 func TestStreamConnSatisfiesNetConn(t *testing.T) {
-	// Compile-time check: streamConn implements net.Conn
+	// 编译时检查：streamConn 实现了 net.Conn 接口
 	var _ net.Conn = (*streamConn)(nil)
 }
 

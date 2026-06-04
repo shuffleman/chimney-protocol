@@ -25,7 +25,7 @@ func TestIntentLayer_AddContains(t *testing.T) {
 
 	entry := IntentEntry{
 		SNI:         "example.com",
-		Description: "Test site",
+		Description: "测试站点",
 	}
 
 	il.Add(entry)
@@ -33,7 +33,7 @@ func TestIntentLayer_AddContains(t *testing.T) {
 	if !il.Contains("example.com") {
 		t.Error("Contains('example.com') = false, want true")
 	}
-	if !il.Contains("EXAMPLE.COM") { // case insensitive
+	if !il.Contains("EXAMPLE.COM") { // 不区分大小写
 		t.Error("Contains('EXAMPLE.COM') = false, want true (case insensitive)")
 	}
 	if il.Contains("not-in-list.com") {
@@ -93,7 +93,7 @@ func TestIntentLayer_List(t *testing.T) {
 		t.Errorf("List length = %d, want 3", len(list))
 	}
 
-	// Check all entries are present
+	// 检查所有条目是否存在
 	seen := make(map[string]bool)
 	for _, sni := range list {
 		seen[sni] = true
@@ -106,7 +106,7 @@ func TestIntentLayer_List(t *testing.T) {
 }
 
 func TestLoadIntentFromYAML(t *testing.T) {
-	// Create temporary YAML file
+	// 创建临时 YAML 文件
 	tmpDir := t.TempDir()
 	yamlPath := filepath.Join(tmpDir, "intent.yaml")
 
@@ -312,7 +312,7 @@ func TestManager_LoadManager(t *testing.T) {
 	intentPath := filepath.Join(tmpDir, "intent.yaml")
 	enforcePath := filepath.Join(tmpDir, "enforce.yaml")
 
-	// Create intent file
+	// 创建 intent 文件
 	os.WriteFile(intentPath, []byte(`
 version: 1
 entries:
@@ -320,7 +320,7 @@ entries:
     sni: test.com
 `), 0644)
 
-	// Create enforce file
+	// 创建 enforce 文件
 	os.WriteFile(enforcePath, []byte(`
 version: 1
 entries:
@@ -375,7 +375,7 @@ func BenchmarkIntentLayer_Contains(b *testing.B) {
 
 func BenchmarkEnforceLayer_Contains(b *testing.B) {
 	el := NewEnforceLayer()
-	// Add ~50 common AWS CIDRs
+	// 添加约 50 个常见的 AWS CIDR
 	cidrs := []string{
 		"3.2.34.0/26", "3.2.35.0/24", "3.208.0.0/12", "3.224.0.0/12",
 		"13.58.0.0/15", "18.204.0.0/14", "34.192.0.0/12", "44.192.0.0/11",
@@ -392,7 +392,7 @@ func BenchmarkEnforceLayer_Contains(b *testing.B) {
 	}
 }
 
-// Ensure error types are correct
+// 确保错误类型正确
 func TestErrorTypes(t *testing.T) {
 	if ErrSNIRejected == nil {
 		t.Error("ErrSNIRejected should not be nil")

@@ -17,7 +17,7 @@ func TestGeneratePSK(t *testing.T) {
 		t.Errorf("PSK length = %d, want 32", len(psk))
 	}
 
-	// Ensure PSK is random (not all zeros)
+	// 确保 PSK 是随机的（不全是零）
 	allZero := true
 	for _, b := range psk {
 		if b != 0 {
@@ -51,7 +51,7 @@ func TestDeriver_DeriveAuthKey(t *testing.T) {
 		t.Errorf("K_auth length = %d, want %d", len(kAuth1), DefaultKeyLen)
 	}
 
-	// Same inputs → same key
+	// 相同输入 → 相同密钥
 	kAuth2, err := deriver.DeriveAuthKey(serverRandom)
 	if err != nil {
 		t.Fatalf("DeriveAuthKey second call failed: %v", err)
@@ -60,7 +60,7 @@ func TestDeriver_DeriveAuthKey(t *testing.T) {
 		t.Error("DeriveAuthKey not deterministic: same inputs produced different keys")
 	}
 
-	// Different ServerRandom → different key
+	// 不同的 ServerRandom → 不同的密钥
 	serverRandom[0] ^= 0xFF
 	kAuth3, err := deriver.DeriveAuthKey(serverRandom)
 	if err != nil {
@@ -96,7 +96,7 @@ func TestDeriver_DeriveSessionKey(t *testing.T) {
 		t.Errorf("K_sess length = %d, want %d", len(kSess1), DefaultKeyLen)
 	}
 
-	// Same inputs → same key
+	// 相同输入 → 相同密钥
 	kSess2, err := deriver.DeriveSessionKey(serverRandom, clientRandom)
 	if err != nil {
 		t.Fatalf("DeriveSessionKey second call failed: %v", err)
@@ -105,7 +105,7 @@ func TestDeriver_DeriveSessionKey(t *testing.T) {
 		t.Error("DeriveSessionKey not deterministic")
 	}
 
-	// Different ClientRandom → different key
+	// 不同的 ClientRandom → 不同的密钥
 	clientRandom[0] ^= 0xFF
 	kSess3, err := deriver.DeriveSessionKey(serverRandom, clientRandom)
 	if err != nil {
@@ -119,7 +119,7 @@ func TestDeriver_DeriveSessionKey(t *testing.T) {
 func TestDeriver_DeriveAuthKey_InvalidLength(t *testing.T) {
 	deriver := NewDeriver([]byte("test-psk"))
 
-	// ServerRandom must be 32 bytes
+	// ServerRandom 必须是 32 字节
 	_, err := deriver.DeriveAuthKey([]byte("too-short"))
 	if err == nil {
 		t.Error("Expected error for short ServerRandom, got nil")
@@ -168,7 +168,7 @@ func TestDeriver_AuthTag(t *testing.T) {
 		t.Errorf("Tag length = %d, want %d", len(tag1), DefaultTagLen)
 	}
 
-	// Same inputs → same tag
+	// 相同输入 → 相同标签
 	tag2, err := deriver.AuthTag(serverRandom, recordBytes, DefaultTagLen)
 	if err != nil {
 		t.Fatalf("AuthTag second call failed: %v", err)
@@ -177,7 +177,7 @@ func TestDeriver_AuthTag(t *testing.T) {
 		t.Error("AuthTag not deterministic")
 	}
 
-	// Different record bytes → different tag
+	// 不同的记录字节 → 不同的标签
 	tag3, err := deriver.AuthTag(serverRandom, []byte("different-record"), DefaultTagLen)
 	if err != nil {
 		t.Fatalf("AuthTag with different record failed: %v", err)
@@ -207,7 +207,7 @@ func TestDeriver_VerifyAuthTag(t *testing.T) {
 		t.Fatalf("AuthTag failed: %v", err)
 	}
 
-	// Verify with correct tag
+	// 使用正确的标签验证
 	ok, err := deriver.VerifyAuthTag(serverRandom, recordBytes, tag)
 	if err != nil {
 		t.Fatalf("VerifyAuthTag failed: %v", err)
@@ -216,7 +216,7 @@ func TestDeriver_VerifyAuthTag(t *testing.T) {
 		t.Error("VerifyAuthTag returned false for valid tag")
 	}
 
-	// Verify with wrong tag
+	// 使用错误的标签验证
 	wrongTag := make([]byte, len(tag))
 	copy(wrongTag, tag)
 	wrongTag[0] ^= 0xFF
@@ -229,7 +229,7 @@ func TestDeriver_VerifyAuthTag(t *testing.T) {
 		t.Error("VerifyAuthTag returned true for invalid tag")
 	}
 
-	// Verify with wrong PSK
+	// 使用错误的 PSK 验证
 	differentDeriver := NewDeriver([]byte("different-psk-12345678"))
 	ok, err = differentDeriver.VerifyAuthTag(serverRandom, recordBytes, tag)
 	if err != nil {

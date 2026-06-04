@@ -1,5 +1,5 @@
-// tcp_raw_test sends 16414-byte chunks over raw TCP and verifies them.
-// This isolates whether the corruption is in the Windows TCP stack or in chimney.
+// tcp_raw_test 通过原始 TCP 发送 16414 字节块并验证它们。
+// 这用于隔离损坏是发生在 Windows TCP 栈还是 chimney 中。
 package main
 
 import (
@@ -19,7 +19,7 @@ const chunkSize = 16414
 const numChunks = 500
 
 func main() {
-	// Server (receiver)
+	// 服务器（接收方）
 	ln, err := net.Listen("tcp", "127.0.0.1:19998")
 	if err != nil {
 		log.Fatal("listen:", err)
@@ -29,7 +29,7 @@ func main() {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
 
-	// Generate predictable chunks
+	// 生成可预测的块
 	chunks := make([][]byte, numChunks)
 	hashes := make([]string, numChunks)
 	for i := range chunks {
@@ -40,7 +40,7 @@ func main() {
 		hashes[i] = hex.EncodeToString(h[:8])
 	}
 
-	// Receiver goroutine
+	// 接收方协程
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -70,7 +70,7 @@ func main() {
 			totalRead += n
 		}
 
-		// Verify each chunk
+		// 验证每个块
 		errors := 0
 		for i := 0; i < numChunks; i++ {
 			start := i * chunkSize
@@ -85,7 +85,7 @@ func main() {
 			if got != hashes[i] {
 				errors++
 				if errors <= 5 {
-					// Find first diff
+					// 找到第一个差异点
 					expected := chunks[i]
 					firstDiff := -1
 					for j := 0; j < len(chunk); j++ {
@@ -119,8 +119,8 @@ func main() {
 		log.Printf("All %d chunks verified OK", numChunks)
 	}()
 
-	// Sender
-	time.Sleep(100 * time.Millisecond) // wait for listener
+	// 发送方
+	time.Sleep(100 * time.Millisecond) // 等待监听器就绪
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

@@ -21,7 +21,7 @@ func TestNewProvider(t *testing.T) {
 		t.Fatalf("expected 3 blocks, got %d", p.Len())
 	}
 
-	// Verify blocks are sorted by size (ascending)
+	// 验证块按大小升序排序
 	for i := 1; i < len(p.blocks); i++ {
 		if p.blocks[i-1].Size > p.blocks[i].Size {
 			t.Errorf("blocks not sorted: p.blocks[%d].Size=%d > p.blocks[%d].Size=%d",
@@ -44,7 +44,7 @@ func TestProviderGetBlock(t *testing.T) {
 		targetSize uint16
 		wantNil    bool
 	}{
-		{"exact fit for small block", 60, false},  // 50 + 9 = 59 <= 60
+		{"exact fit for small block", 60, false},   // 50 + 9 = 59 <= 60
 		{"exact fit for medium block", 160, false}, // 150 + 9 = 159 <= 160
 		{"too small target", 10, true},             // 10 - 9 = 1, minimal content
 		{"large target gets largest block", 1000, false},
@@ -82,7 +82,7 @@ func TestProviderLen(t *testing.T) {
 }
 
 func TestLoadProviderFromFile(t *testing.T) {
-	// Create test blocks with base64-encoded content
+	// 创建测试块，使用 base64 编码的内容
 	blocks := []Block{
 		{Size: 0, Content: base64.StdEncoding.EncodeToString([]byte("hello-world-content"))},
 		{Size: 0, Content: base64.StdEncoding.EncodeToString([]byte("short"))},
@@ -109,13 +109,13 @@ func TestLoadProviderFromFile(t *testing.T) {
 		t.Errorf("expected 3 blocks, got %d", p.Len())
 	}
 
-	// Verify content was decoded: "short" is 5 bytes
-	got := p.GetBlock(20) // 20 - 9 = 11, should fit "short" (5 bytes) or "hello-world-content" (19 bytes)
+	// 验证内容已解码："short" 是 5 字节
+	got := p.GetBlock(20) // 20 - 9 = 11, 应适合 "short" (5 字节) 或 "hello-world-content" (19 字节)
 	if got == nil {
 		t.Fatal("expected non-nil block")
 	}
-	// "hello-world-content" = 19 bytes, with frame header = 28, which is > 20
-	// So it should pick "short" (5 bytes) since that's the largest fitting block
+	// "hello-world-content" = 19 字节，加上帧头部 = 28，即 > 20
+	// 因此应选择 "short" (5 字节)，因为它是能容纳的最大块
 	if string(got) != "short" {
 		t.Logf("got content: %q (len=%d)", string(got), len(got))
 	}

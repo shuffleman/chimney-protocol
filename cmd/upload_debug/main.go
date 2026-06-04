@@ -1,5 +1,5 @@
-// upload_debug runs a local relay + client and performs concurrent uploads,
-// capturing both sides' record trails when a bad record MAC occurs.
+// upload_debug 运行本地中继 + 客户端并执行并发上传，
+// 在出现坏记录 MAC 时捕获双方的记录轨迹。
 package main
 
 import (
@@ -24,30 +24,30 @@ import (
 	"github.com/shuffleman/chimney-protocol/internal/record"
 )
 
-// tracedOp records one seal/open operation for post-mortem comparison.
+// tracedOp 记录一次 seal/open 操作，用于事后比较。
 type tracedOp struct {
-	dir         string // "seal" or "open" or "open-ERR"
+	dir         string // "seal" 或 "open" 或 "open-ERR"
 	seq         uint64
-	nonce       string // hex
-	hdr         string // hex (5 bytes)
-	plainFP     string // hex (first 4 bytes of plaintext, or empty for errors)
-	plainHash   string // hex (SHA256 of full plaintext)
-	ctxtFP      string // hex (first 8 bytes of ciphertext)
-	ctxtHash    string // hex (SHA256 of full ciphertext)
-	ctxtPreview string // hex (first 64 bytes of ciphertext)
-	keyFP       string // hex (4 bytes, first 4 bytes of SHA256(key))
+	nonce       string // 十六进制
+	hdr         string // 十六进制（5 字节）
+	plainFP     string // 十六进制（明文前 4 字节，错误时为空）
+	plainHash   string // 十六进制（完整明文的 SHA256）
+	ctxtFP      string // 十六进制（密文前 8 字节）
+	ctxtHash    string // 十六进制（完整密文的 SHA256）
+	ctxtPreview string // 十六进制（密文前 64 字节）
+	keyFP       string // 十六进制（4 字节，SHA256(key) 的前 4 字节）
 }
 
-// traceCollector gathers seal/open ops from both sides in a single process.
+// traceCollector 在单个进程中收集双方的 seal/open 操作。
 type traceCollector struct {
 	mu         sync.Mutex
 	ops        []tracedOp
 	openErrCnt int
 	sealCnt    int
 	openCnt    int
-	sealFull   map[uint64][]byte // seq -> full ciphertext (for byte-level comparison)
-	encodeRecs map[string][]byte // "keyFP:seq" -> full record bytes (from EncodeRecord)
-	decodeRecs map[string][]byte // "keyFP:seq" -> full record bytes (from DecodeRecord)
+	sealFull   map[uint64][]byte // seq -> 完整密文（用于字节级比较）
+	encodeRecs map[string][]byte // "keyFP:seq" -> 完整记录字节（来自 EncodeRecord）
+	decodeRecs map[string][]byte // "keyFP:seq" -> 完整记录字节（来自 DecodeRecord）
 }
 
 func (tc *traceCollector) recordTrace(dir string, seq uint64, recordData []byte, keyFP [4]byte) {
@@ -68,7 +68,7 @@ func (tc *traceCollector) recordTrace(dir string, seq uint64, recordData []byte,
 		cp := make([]byte, len(recordData))
 		copy(cp, recordData)
 		tc.decodeRecs[keyID] = cp
-		// Compare with encode only when the same keyFP:seq exists
+		// 仅当相同的 keyFP:seq 存在时才与 encode 比较
 		if encRec, ok := tc.encodeRecs[keyID]; ok {
 			if len(encRec) != len(cp) {
 				log.Printf("!!! RECORD MISMATCH %s: len(encode)=%d len(decode)=%d", keyID, len(encRec), len(cp))
@@ -174,7 +174,7 @@ func (tc *traceCollector) add(dir string, seq uint64, nonce, hdr, plaintext, cip
 		tc.openErrCnt++
 		log.Printf("!!! open-ERR captured: seq=%d nonce=%s hdr=%s ctxtFP=%s",
 			seq, nonceHex, hdrHex, ctxtFp)
-		// Byte-by-byte comparison with corresponding seal
+		// 与对应的 seal 进行逐字节比较
 		if sealCtxt, ok := tc.sealFull[seq]; ok {
 			mismatches := 0
 			firstMismatch := -1
@@ -222,7 +222,7 @@ func (tc *traceCollector) dumpMismatch(relayFailSeq uint64) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "=== Trace comparison around seq %d ===\n", relayFailSeq)
 
-	// Separate seal and open ops
+	// 分离 seal 和 open 操作
 	type opPair struct{ seal, open *tracedOp }
 	bySeq := make(map[uint64]*opPair)
 	for i := range tc.ops {
@@ -238,7 +238,7 @@ func (tc *traceCollector) dumpMismatch(relayFailSeq uint64) string {
 		}
 	}
 
-	// Show the last N sequences around the failure.
+	// 显示失败周围最后 N 个序列。
 	start := int64(relayFailSeq) - 10
 	if start < 0 {
 		start = 0
@@ -272,22 +272,22 @@ func (tc *traceCollector) dumpMismatch(relayFailSeq uint64) string {
 func main() {
 	collector := &traceCollector{}
 
-	// Install a DebugTracer that captures every seal/open operation.
+	// 安装捕获每个 seal/open 操作的 DebugTracer。
 	record.DebugTracer = func(dir string, seq uint64, nonce, hdr, plaintext, ciphertext []byte, keyFP [4]byte) {
 		collector.add(dir, seq, nonce, hdr, plaintext, ciphertext, keyFP)
 	}
-	// Install a RecordTraceHook that captures full record bytes from both sides.
-	// keyFP distinguishes client→relay (sendKey) from relay→client (recvKey) directions.
+	// 安装捕获双方完整记录字节的 RecordTraceHook。
+	// keyFP 区分客户端→中继（sendKey）和中继→客户端（recvKey）方向。
 	record.RecordTraceHook = func(dir string, seq uint64, recordData []byte, keyFP [4]byte) {
 		collector.recordTrace(dir, seq, recordData, keyFP)
 	}
 
-	// PSK used by both sides.
+	// PSK 由双方使用。
 	psk := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	userID := "default"
 	tagLen := 16
 
-	// Start a discard backend server.
+	// 启动丢弃后端服务器。
 	discardLn, err := net.Listen("tcp", "127.0.0.1:19999")
 	if err != nil {
 		log.Fatal("discard listen:", err)
@@ -306,7 +306,7 @@ func main() {
 	}()
 	log.Println("Discard backend on :19999")
 
-	// Start the relay.
+	// 启动中继。
 	relayCfg := &chimney.RelayConfig{
 		ListenAddr:  "127.0.0.1:19443",
 		PSK:         psk,
@@ -329,7 +329,7 @@ func main() {
 	time.Sleep(200 * time.Millisecond)
 	log.Println("Relay on :19443")
 
-	// Start the client.
+	// 启动客户端。
 	clientCfg := chimney.Config{
 		RelayAddr:        "127.0.0.1:19443",
 		SNI:              "cloudflare.com",
@@ -339,7 +339,7 @@ func main() {
 		Fingerprint:      "chrome",
 		ConnectTimeout:   10 * time.Second,
 		HandshakeTimeout: 10 * time.Second,
-		PoolSize:         4, // Match speedtest pool_size
+		PoolSize:         4, // 匹配 speedtest pool_size
 	}
 
 	dialer, err := chimney.NewDialer(clientCfg)
@@ -349,7 +349,7 @@ func main() {
 	defer dialer.Close()
 	log.Println("Client dialer created")
 
-	// Run concurrent uploads to reproduce the 8-stream issue.
+	// 运行并发上传以重现 8 流问题。
 	const numUploads = 8
 	const uploadSize = 20 * 1024 * 1024
 	const targetAddr = "127.0.0.1:19999"
@@ -360,7 +360,7 @@ func main() {
 	var badMACCount atomic.Int64
 	var firstErrorMsg atomic.Value
 
-	// Background goroutine to periodically dump client diagnostics.
+	// 后台协程，定期转储客户端诊断信息。
 	stopDiag := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
@@ -423,7 +423,7 @@ func main() {
 
 	log.Printf("Started %d uploads of %d bytes each...", numUploads, uploadSize)
 
-	// Wait with timeout since conn.Close() can block when tunnel is broken.
+	// 使用超时等待，因为隧道断开时 conn.Close() 可能阻塞。
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -444,14 +444,14 @@ func main() {
 		log.Printf("First error: %s", firstMsg)
 	}
 
-	// Print final client-side diagnostics.
+	// 打印最终客户端端诊断信息。
 	log.Println("=== Final client diagnostics ===")
 	log.Print(dialer.Diagnostics())
 
 	log.Printf("=== Trace stats: seal=%d open=%d open-ERR=%d ===",
 		collector.sealCnt, collector.openCnt, collector.openErrCnt)
 
-	// Find the failure sequence from the trace.
+	// 从跟踪中找到失败的序列。
 	collector.mu.Lock()
 	opsCopy := make([]tracedOp, len(collector.ops))
 	copy(opsCopy, collector.ops)
@@ -465,7 +465,7 @@ func main() {
 			break
 		}
 	}
-	// Fallback: use first open-ERR even if seq=0 (pre-check)
+	// 回退：即使 seq=0（预检查）也使用第一个 open-ERR
 	if failSeq == 0 {
 		for _, op := range opsCopy {
 			if op.dir == "open-ERR" {
@@ -477,7 +477,7 @@ func main() {
 	if failSeq == 0 && openErrCnt > 0 {
 		log.Printf("WARNING: openErrCnt=%d but no open-ERR entry found in ops (%d entries)!",
 			openErrCnt, len(opsCopy))
-		// Dump all dir values to debug
+		// 转储所有 dir 值用于调试
 		for i, op := range opsCopy {
 			if op.dir != "seal" && op.dir != "open" {
 				log.Printf("  ops[%d] dir=%q seq=%d", i, op.dir, op.seq)

@@ -1,11 +1,11 @@
-// Package main implements uTLS fingerprint selection and rotation.
+// Package main 实现 uTLS 指纹选择与轮换。
 //
-// The -fingerprint flag accepts a comma-separated list of fingerprint names.
-// Examples:
+// -fingerprint 标志接受逗号分隔的指纹名称列表。
+// 示例：
 //
-//	-fingerprint chrome                     (single fingerprint)
-//	-fingerprint chrome,firefox,safari      (rotate across 3 browsers)
-//	-fingerprint chrome-120,chrome-100      (rotate across Chrome versions)
+//	-fingerprint chrome                     （单个指纹）
+//	-fingerprint chrome,firefox,safari      （在 3 种浏览器间轮换）
+//	-fingerprint chrome-120,chrome-100      （在 Chrome 版本间轮换）
 package main
 
 import (
@@ -16,17 +16,17 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-// FingerprintRotator cycles through a list of uTLS ClientHelloIDs.
-// It is safe for concurrent use across multiple connections.
+// FingerprintRotator 循环遍历 uTLS ClientHelloID 列表。
+// 可在多个连接间安全并发使用。
 type FingerprintRotator struct {
-	ids  []utls.ClientHelloID
-	cur  int
-	mu   sync.Mutex
+	ids []utls.ClientHelloID
+	cur int
+	mu  sync.Mutex
 }
 
-// NewFingerprintRotator creates a rotator from a list of fingerprint names.
-// Each name can be a short alias (e.g. "chrome") or include a version
-// (e.g. "chrome-120", "firefox-105").
+// NewFingerprintRotator 从指纹名称列表创建轮换器。
+// 每个名称可以是短别名（如"chrome"）或包含版本
+// （如"chrome-120"、"firefox-105"）。
 func NewFingerprintRotator(names []string) (*FingerprintRotator, error) {
 	if len(names) == 0 {
 		return nil, fmt.Errorf("at least one fingerprint name is required")
@@ -44,7 +44,7 @@ func NewFingerprintRotator(names []string) (*FingerprintRotator, error) {
 	return &FingerprintRotator{ids: ids}, nil
 }
 
-// Next returns the next fingerprint in the rotation.
+// Next 返回轮换中的下一个指纹。
 func (r *FingerprintRotator) Next() utls.ClientHelloID {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -53,13 +53,13 @@ func (r *FingerprintRotator) Next() utls.ClientHelloID {
 	return id
 }
 
-// parseFingerprint maps a name string to a uTLS ClientHelloID.
+// parseFingerprint 将名称字符串映射到 uTLS ClientHelloID。
 func parseFingerprint(name string) (utls.ClientHelloID, error) {
-	// Normalize: lowercase, hyphens to underscores
+	// 标准化：转小写，连字符转下划线
 	normalized := strings.ToLower(name)
 
 	switch normalized {
-	// --- Chrome variants ---
+	// --- Chrome 变体 ---
 	case "chrome":
 		return utls.HelloChrome_Auto, nil
 	case "chrome-58":
@@ -87,7 +87,7 @@ func parseFingerprint(name string) (utls.ClientHelloID, error) {
 	case "chrome-120-pq":
 		return utls.HelloChrome_120_PQ, nil
 
-	// --- Firefox variants ---
+	// --- Firefox 变体 ---
 	case "firefox":
 		return utls.HelloFirefox_Auto, nil
 	case "firefox-55":
@@ -107,13 +107,13 @@ func parseFingerprint(name string) (utls.ClientHelloID, error) {
 	case "firefox-120":
 		return utls.HelloFirefox_120, nil
 
-	// --- Safari ---
+	// --- Safari 变体 ---
 	case "safari":
 		return utls.HelloSafari_Auto, nil
 	case "safari-16":
 		return utls.HelloSafari_16_0, nil
 
-	// --- iOS ---
+	// --- iOS 变体 ---
 	case "ios":
 		return utls.HelloIOS_Auto, nil
 	case "ios-11":
@@ -125,7 +125,7 @@ func parseFingerprint(name string) (utls.ClientHelloID, error) {
 	case "ios-14":
 		return utls.HelloIOS_14, nil
 
-	// --- Edge ---
+	// --- Edge 变体 ---
 	case "edge":
 		return utls.HelloEdge_Auto, nil
 	case "edge-85":
@@ -133,11 +133,11 @@ func parseFingerprint(name string) (utls.ClientHelloID, error) {
 	case "edge-106":
 		return utls.HelloEdge_106, nil
 
-	// --- Android ---
+	// --- Android 变体 ---
 	case "android":
 		return utls.HelloAndroid_11_OkHttp, nil
 
-	// --- Chinese browsers ---
+	// --- 国产浏览器 ---
 	case "360":
 		return utls.Hello360_Auto, nil
 	case "360-7":
@@ -149,7 +149,7 @@ func parseFingerprint(name string) (utls.ClientHelloID, error) {
 	case "qq-11":
 		return utls.HelloQQ_11_1, nil
 
-	// --- Randomized ---
+	// --- 随机化 ---
 	case "randomized":
 		return utls.HelloRandomized, nil
 	case "randomized-alpn":
@@ -157,7 +157,7 @@ func parseFingerprint(name string) (utls.ClientHelloID, error) {
 	case "randomized-noalpn":
 		return utls.HelloRandomizedNoALPN, nil
 
-	// --- Golang ---
+	// --- Golang 变体 ---
 	case "golang":
 		return utls.HelloGolang, nil
 
@@ -167,7 +167,7 @@ func parseFingerprint(name string) (utls.ClientHelloID, error) {
 	}
 }
 
-// FingerprintNames returns a comma-separated list for flag default/usage.
+// FingerprintNames 返回一个逗号分隔的列表，用于标志默认值/用法。
 func FingerprintNames(rotator *FingerprintRotator) string {
 	if rotator == nil {
 		return ""

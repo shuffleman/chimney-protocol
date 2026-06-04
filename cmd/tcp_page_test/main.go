@@ -1,4 +1,4 @@
-// tcp_page_test: test chimney-specific record sizes and fix validation.
+// tcp_page_test: 测试 chimney 特定的记录大小和修复验证。
 package main
 
 import (
@@ -140,10 +140,10 @@ func runTest(recSize int, port int, delay time.Duration) string {
 }
 
 func main() {
-	// Chimney record sizes:
-	// Record = 5 (TLS) + 9 (H2 header) + H2_payload + 16 (AEAD tag) = 30 + H2_payload
-	// H2_payload = 16384 (current) → record = 16414
-	// H2_payload = 4066 (proposed) → record = 4096
+	// Chimney 记录大小：
+	// 记录 = 5 (TLS) + 9 (H2 头) + H2_payload + 16 (AEAD 标签) = 30 + H2_payload
+	// H2_payload = 16384（当前）→ 记录 = 16414
+	// H2_payload = 4066（建议）→ 记录 = 4096
 
 	tests := []struct {
 		size  int

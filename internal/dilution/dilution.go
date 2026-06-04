@@ -1,9 +1,9 @@
-// Package dilution provides real content blocks for the dilution stream.
+// Package dilution 为稀释流提供真实内容块。
 //
-// Dilution frames carry pre-recorded HTTP response content (HTML, CSS, JS, JSON)
-// instead of random bytes. This makes the traffic semantically indistinguishable
-// from real web browsing under DPI analysis. The content blocks are loaded from
-// a JSON file that was captured from real HTTPS sessions to the whitelisted site.
+// 稀释帧携带预录的 HTTP 响应内容（HTML、CSS、JS、JSON）
+// 而非随机字节。这使得流量在 DPI 分析下与真实网页浏览
+// 在语义上不可区分。内容块从白名单站点的真实 HTTPS 会话
+// 抓取的 JSON 文件中加载。
 package dilution
 
 import (
@@ -14,19 +14,18 @@ import (
 	"sort"
 )
 
-// Block represents a single captured HTTP response chunk with its size.
+// Block 表示单个抓取的 HTTP 响应块及其大小。
 type Block struct {
 	Size    int    `json:"size"`
-	Content string `json:"content"` // base64-encoded content
+	Content string `json:"content"` // base64 编码的内容
 }
 
-// Provider manages pre-recorded content blocks and selects appropriate
-// blocks to match target record sizes.
+// Provider 管理预录的内容块，并选择适合的块来匹配目标记录大小。
 type Provider struct {
 	blocks []Block
 }
 
-// NewProvider creates a Provider from a slice of blocks.
+// NewProvider 从块切片创建一个 Provider。
 func NewProvider(blocks []Block) *Provider {
 	sort.Slice(blocks, func(i, j int) bool {
 		return blocks[i].Size < blocks[j].Size
@@ -34,8 +33,8 @@ func NewProvider(blocks []Block) *Provider {
 	return &Provider{blocks: blocks}
 }
 
-// LoadProviderFromFile loads content blocks from a JSON file.
-// The file format is a JSON array of Block objects with base64-encoded content.
+// LoadProviderFromFile 从 JSON 文件加载内容块。
+// 文件格式是 Block 对象的 JSON 数组，内容为 base64 编码。
 func LoadProviderFromFile(path string) (*Provider, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -47,7 +46,7 @@ func LoadProviderFromFile(path string) (*Provider, error) {
 		return nil, fmt.Errorf("dilution: parse blocks: %w", err)
 	}
 
-	// Decode base64 content and update sizes to reflect decoded length.
+	// 解码 base64 内容并更新大小为解码后的长度。
 	for i := range rawBlocks {
 		decoded, err := base64.StdEncoding.DecodeString(rawBlocks[i].Content)
 		if err != nil {
@@ -60,27 +59,26 @@ func LoadProviderFromFile(path string) (*Provider, error) {
 	return NewProvider(rawBlocks), nil
 }
 
-// GetBlock returns a content block whose encoded size is close to targetSize.
-// It returns the largest block that fits within targetSize (minus 9 bytes for
-// the H2 frame header), looking at blocks up to 20% below targetSize if no
-// exact fit is found.
+// GetBlock 返回编码大小接近 targetSize 的内容块。
+// 返回适合 targetSize（减去 H2 帧头 9 字节）的最大块，
+// 如果未找到精确匹配，则查找 targetSize 80% 以上的块。
 func (p *Provider) GetBlock(targetSize uint16) []byte {
 	if len(p.blocks) == 0 {
 		return nil
 	}
 
-	// We need the block's frame (9-byte header + content) to fit in targetSize.
-	// So max content size = targetSize - 9.
+	// 块的帧（9 字节头 + 内容）需要适合 targetSize。
+	// 因此最大内容大小 = targetSize - 9。
 	maxContent := int(targetSize) - 9
 	if maxContent <= 0 {
 		return nil
 	}
 
-	// Find the largest block that fits within maxContent.
-	// Treat blocks with size within 20% of maxContent as acceptable fits.
+	// 找到适合 maxContent 的最大块。
+	// 将大小在 maxContent 的 20% 以内的块视为可接受的匹配。
 	minContent := int(float64(maxContent) * 0.8)
 
-	// Try to find an exact-fit block: size <= maxContent but as large as possible.
+	// 尝试找到精确匹配的块：大小 <= maxContent 但尽可能大。
 	var best Block
 	for _, b := range p.blocks {
 		if b.Size <= maxContent && b.Size > best.Size {
@@ -88,12 +86,12 @@ func (p *Provider) GetBlock(targetSize uint16) []byte {
 		}
 	}
 
-	// If the best fit is too small (less than 80% of maxContent), just use the
-	// largest available block and let the caller pad the rest.
+	// 如果最佳匹配太小（小于 maxContent 的 80%），则使用
+	// 最大可用块，让调用者填充剩余部分。
 	if best.Size < minContent && len(p.blocks) > 0 {
 		best = p.blocks[len(p.blocks)-1] // largest block available
 		if best.Size > maxContent {
-			// Truncation-proof: pick largest that fits
+			// 防截断：选择适合的最大块
 			best = Block{}
 			for _, b := range p.blocks {
 				if b.Size <= maxContent && b.Size > best.Size {
@@ -104,14 +102,14 @@ func (p *Provider) GetBlock(targetSize uint16) []byte {
 	}
 
 	if best.Size == 0 {
-		// No block fits at all
+		// 没有任何块适合
 		return nil
 	}
 
 	return []byte(best.Content)
 }
 
-// Len returns the number of blocks in the provider.
+// Len 返回 provider 中的块数量。
 func (p *Provider) Len() int {
 	return len(p.blocks)
 }

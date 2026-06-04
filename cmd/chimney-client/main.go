@@ -1,14 +1,14 @@
-// cmd/chimney-client is the Chimney client.
+// cmd/chimney-client 是 Chimney 客户端。
 //
-// The client connects to a Chimney relay, performs a real TLS handshake
-// with a whitelisted site via the relay, embeds an auth tag in the first
-// application_data record, and then establishes an H2 tunnel.
+// 客户端连接到 Chimney 中继，通过中继与白名单站点执行真实的 TLS 握手，
+// 在第一个 application_data 记录中嵌入认证标签，
+// 然后建立 H2 隧道。
 //
-// Usage:
+// 用法：
 //
 //	chimney-client -relay relay.example.com:443 -sni real-site.com -dest final-destination.com:443
 //
-// The client uses uTLS to mimic a real browser's TLS fingerprint.
+// 客户端使用 uTLS 模拟真实浏览器的 TLS 指纹。
 package main
 
 import (
@@ -34,21 +34,21 @@ import (
 )
 
 const (
-	// DefaultRelayTimeout is the timeout for relay connections.
+	// DefaultRelayTimeout 是中继连接的超时时间。
 	DefaultRelayTimeout = 10 * time.Second
 
-	// DefaultHandshakeTimeout is the timeout for TLS handshake.
+	// DefaultHandshakeTimeout 是 TLS 握手的超时时间。
 	DefaultHandshakeTimeout = 10 * time.Second
 
-	// socksHandshakeTimeout caps the unauthenticated local SOCKS5 handshake.
+	// socksHandshakeTimeout 限制未经认证的本地 SOCKS5 握手的超时。
 	socksHandshakeTimeout = 10 * time.Second
 
-	// tunnelIdleTimeout caps how long dispatch waits on a blocked stream
-	// before declaring the tunnel unhealthy.
+	// tunnelIdleTimeout 限制 dispatch 在阻塞流上等待的时间，
+	// 超过后将声明隧道不健康。
 	tunnelIdleTimeout = 30 * time.Second
 
-	// maxTunnelDataChunk leaves one byte for the Chimney tunnel command prefix
-	// so every H2 DATA frame carries its own 0x02 DATA command.
+	// maxTunnelDataChunk 为 Chimney 隧道命令前缀保留一个字节，
+	// 使每个 H2 DATA 帧携带自己的 0x02 DATA 命令。
 	maxTunnelDataChunk = 16*1024 - 1
 )
 
@@ -93,7 +93,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create client
+	// 创建客户端
 	fingerprints := strings.Split(*fingerprintStr, ",")
 	fpRotator, err := NewFingerprintRotator(fingerprints)
 	if err != nil {
@@ -102,7 +102,7 @@ func main() {
 	}
 	logger.Info("fingerprint rotation configured", "fingerprints", FingerprintNames(fpRotator))
 
-	// Load traffic profile for padding (optional)
+	// 加载流量配置文件以进行填充（可选）
 	var trafficProfile *profile.Model
 	if *profileFile != "" {
 		trafficProfile, err = profile.LoadModelFromFile(*profileFile)
@@ -116,7 +116,7 @@ func main() {
 		)
 	}
 
-	// Load dilution content blocks (optional)
+	// 加载稀释内容块（可选）
 	var dilutionProv *dilution.Provider
 	if *dilutionFile != "" {
 		dilutionProv, err = dilution.LoadProviderFromFile(*dilutionFile)
@@ -201,7 +201,7 @@ func applyClientConfig(
 	}
 }
 
-// Client is the Chimney client.
+// Client 是 Chimney 客户端。
 type Client struct {
 	RelayAddr        string
 	SNI              string
@@ -217,7 +217,7 @@ type Client struct {
 	Logger           *slog.Logger
 }
 
-// Run starts the client.
+// Run 启动客户端。
 func (c *Client) Run() error {
 	manager, err := c.newTunnelManager()
 	if err != nil {
@@ -225,34 +225,34 @@ func (c *Client) Run() error {
 	}
 	defer manager.Close()
 
-	// Start local SOCKS5 proxy that forwards through reconnecting tunnels.
+	// 启动本地 SOCKS5 代理，通过重连隧道转发流量。
 	return c.runSOCKS5(manager)
 }
 
-// establishTunnel establishes the Chimney tunnel to the relay.
+// establishTunnel 建立到中继的 Chimney 隧道。
 //
-// Protocol flow (revised for post-swap auth):
-//  1. TCP connect to relay
-//  2. TLS handshake with SNI=whitelisted site (uses uTLS Chrome fingerprint)
-//  3. Extract ServerRandom & ClientRandom from handshake
-//  4. Send a dummy first application_data record (TLS encrypted) as heuristic
-//     trigger for the relay — contains minimal H2-like padding
-//  5. Compute auth tag = HMAC(K_auth, ServerRandom || ClientRandom)
-//  6. Derive K_sess from PSK + both randoms
-//  7. Switch to ChimneyRecord layer (AEAD with K_sess)
-//  8. Send H2 preface + SETTINGS as ChimneyRecords
-//  9. Complete H2 handshake (SETTINGS + ACK exchange)
+// 协议流程（修订版，用于交换后认证）：
+//  1. TCP 连接到中继
+//  2. TLS 握手，SNI=白名单站点（使用 uTLS Chrome 指纹）
+//  3. 从握手中提取 ServerRandom 和 ClientRandom
+//  4. 发送一个虚拟的第一个 application_data 记录（TLS 加密）作为启发式
+//     触发中继——包含最小的 H2 类填充
+//  5. 计算认证标签 = HMAC(K_auth, ServerRandom || ClientRandom)
+//  6. 从 PSK + 两个随机数派生 K_sess
+//  7. 切换到 ChimneyRecord 层（使用 K_sess 的 AEAD）
+//  8. 发送 H2 前言 + SETTINGS 作为 ChimneyRecords
+//  9. 完成 H2 握手（SETTINGS + ACK 交换）
 //
-// 10. Send auth tag as first DATA frame on stream 1
-// 11. Relay verifies post-swap; tunnel is ready
+// 10. 在流 1 上发送认证标签作为第一个 DATA 帧
+// 11. 中继验证交换后状态；隧道准备就绪
 func (c *Client) establishTunnel() (net.Conn, error) {
-	// Step 1: Connect to relay
+	// 第 1 步：连接到中继
 	conn, err := net.DialTimeout("tcp", c.RelayAddr, DefaultRelayTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("connect to relay: %w", err)
 	}
 
-	// Step 2: Perform TLS handshake with SNI=whitelisted site
+	// 第 2 步：使用 SNI=白名单站点执行 TLS 握手
 	tlsConfig := &utls.Config{
 		ServerName:         c.SNI,
 		InsecureSkipVerify: true,
@@ -269,7 +269,7 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 		return nil, fmt.Errorf("TLS handshake: %w", err)
 	}
 
-	// Step 3: Extract handshake state
+	// 第 3 步：提取握手状态
 	serverRandom := uConn.HandshakeState.ServerHello.Random
 	clientRandom := uConn.HandshakeState.Hello.Random
 
@@ -283,26 +283,26 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 		"client_random", hex.EncodeToString(clientRandom),
 	)
 
-	// Step 4: Derive keys immediately after handshake.
-	// The relay intercepts the first application_data record (0x17) at the
-	// TLS record layer — no grace period or dummy record needed.
+	// 第 4 步：握手后立即派生密钥。
+	// 中继在 TLS 记录层拦截第一个 application_data 记录（0x17）——
+	// 无需宽限期或虚拟记录。
 	deriver, err := keyderiv.NewDeriverFromHex(c.PSKHex)
 	if err != nil {
 		uConn.Close()
 		return nil, fmt.Errorf("create deriver: %w", err)
 	}
 
-	// Compute auth tag = HMAC(K_auth, ServerRandom || ClientRandom)
+	// 计算认证标签 = HMAC(K_auth, ServerRandom || ClientRandom)
 	tag, err := deriver.AuthTag(serverRandom, clientRandom, c.TagLen)
 	if err != nil {
 		uConn.Close()
 		return nil, fmt.Errorf("compute auth tag: %w", err)
 	}
 
-	// Compute key hint for multi-user auth.
+	// 计算多用户认证的密钥提示。
 	keyHint := keyderiv.ComputeKeyHint(c.UserID)
 
-	// Derive directional keys for client side
+	// 派生客户端方向的定向密钥
 	sendKey, recvKey, err := deriver.DeriveDirectionalKeys(serverRandom, clientRandom)
 	if err != nil {
 		uConn.Close()
@@ -328,7 +328,7 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 
 	codec, err := record.NewCodecWithDirectionalKeys(sendKey, sendNonceBase, recvKey, recvNonceBase)
 	if err != nil {
-		// Fallback to bidirectional
+		// 回退到双向模式
 		kSess, _ := deriver.DeriveSessionKey(serverRandom, clientRandom)
 		nonceBase, _ := deriver.DeriveNonceBase(serverRandom, clientRandom)
 		codec, err = record.NewCodec(kSess, nonceBase)
@@ -338,10 +338,10 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 		}
 	}
 
-	// Step 6: Drain stale bytes from TCP buffer before switching to ChimneyRecord.
-	// The relay forwarded all server→client data during the handshake, including
-	// any post-handshake records (e.g. NewSessionTicket). uTLS consumed what it
-	// needed, but leftovers in the OS buffer would confuse the RecordReader.
+	// 第 6 步：切换到 ChimneyRecord 前，从 TCP 缓冲区排干陈旧字节。
+	// 中继在握手期间转发了所有服务器→客户端的数据，包括
+	// 任何握手后记录（例如 NewSessionTicket）。uTLS 消费了它
+	// 需要的内容，但操作系统缓冲区中的剩余数据会混淆 RecordReader。
 	rawConn := uConn.GetUnderlyingConn()
 	rawConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 	drainBuf := make([]byte, 8192)
@@ -356,13 +356,13 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 	rawConn.SetReadDeadline(time.Time{})
 	c.Logger.Debug("drained stale TCP bytes", "bytes", drained)
 
-	// Step 7: Wrap connection with ChimneyRecord layer (use raw TCP)
+	// 第 7 步：使用 ChimneyRecord 层包装连接（使用原始 TCP）
 	recReader := record.NewRecordReader(rawConn, codec)
 	recWriter := record.NewRecordWriter(rawConn, codec)
 
 	c.Logger.Debug("codec created, sending H2 preface as ChimneyRecord")
 
-	// Step 7: Send H2 preface + SETTINGS as ChimneyRecords
+	// 第 7 步：发送 H2 前言 + SETTINGS 作为 ChimneyRecords
 	settings := h2engine.DefaultSettings()
 	h2Opening := h2engine.GenerateClientOpeningSequence(settings)
 	c.Logger.Debug("sending H2 preface as ChimneyRecord",
@@ -375,18 +375,18 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 		return nil, fmt.Errorf("send H2 preface: %w", err)
 	}
 
-	// Create H2 engine
+	// 创建 H2 引擎
 	h2Eng := h2engine.NewEngine(settings, codec)
 	h2Eng.SetRecordIO(recReader, recWriter)
 
-	// Step 8: Complete H2 handshake
+	// 第 8 步：完成 H2 握手
 	if err := c.completeH2Handshake(h2Eng, recWriter); err != nil {
 		uConn.Close()
 		return nil, fmt.Errorf("H2 handshake: %w", err)
 	}
 
-	// Step 9: Send auth tag with key hint prefix.
-	// Extended format: [key_hint (4 bytes)] [tag (tagLen bytes)]
+	// 第 9 步：发送带密钥提示前缀的认证标签。
+	// 扩展格式：[key_hint (4 字节)] [tag (tagLen 字节)]
 	authStreamID := h2Eng.OpenStream()
 	authPayload := make([]byte, 4+len(tag))
 	copy(authPayload, keyHint[:])
@@ -403,24 +403,24 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 		"stream", authStreamID,
 	)
 
-	// Step 10: Wait for relay's auth confirmation (empty DATA frame or SETTINGS ACK)
-	// The relay sends a new SETTINGS frame or just proceeds — if we get here
-	// without error, the tunnel is established
+	// 第 10 步：等待中继的认证确认（空 DATA 帧或 SETTINGS ACK）
+	// 中继发送新的 SETTINGS 帧或直接继续——如果我们到达这里
+	// 没有错误，则表示隧道已建立
 
 	c.Logger.Info("Chimney tunnel established")
 
 	return newTunnelConn(rawConn, h2Eng, recReader, recWriter, c.Profile, c.PaddingTarget, c.DilutionProvider), nil
 }
 
-// completeH2Handshake completes the H2 handshake after the swap.
+// completeH2Handshake 在交换后完成 H2 握手。
 func (c *Client) completeH2Handshake(h2Eng *h2engine.Engine, recWriter *record.RecordWriter) error {
-	// As client, we've already sent preface + SETTINGS
-	// Now we need to:
-	// 1. Receive server SETTINGS
-	// 2. Send SETTINGS ACK
-	// 3. Receive server SETTINGS ACK
+	// 作为客户端，我们已经发送了前言 + SETTINGS
+	// 现在我们需要：
+	// 1. 接收服务器 SETTINGS
+	// 2. 发送 SETTINGS ACK
+	// 3. 接收服务器 SETTINGS ACK
 
-	// Read server SETTINGS
+	// 读取服务器 SETTINGS 帧
 	fh, _, err := h2Eng.ReadFrame()
 	if err != nil {
 		return fmt.Errorf("read server SETTINGS: %w", err)
@@ -429,13 +429,13 @@ func (c *Client) completeH2Handshake(h2Eng *h2engine.Engine, recWriter *record.R
 		return fmt.Errorf("expected SETTINGS, got frame type 0x%x", fh.Type)
 	}
 
-	// Send SETTINGS ACK
+	// 发送 SETTINGS ACK 帧
 	ackFrame := h2engine.DefaultSettings().EncodeSettings(true)
 	if err := recWriter.WriteRecord(ackFrame); err != nil {
 		return fmt.Errorf("send SETTINGS ACK: %w", err)
 	}
 
-	// Read server SETTINGS ACK
+	// 读取服务器 SETTINGS ACK 帧
 	fh, _, err = h2Eng.ReadFrame()
 	if err != nil {
 		return fmt.Errorf("read SETTINGS ACK: %w", err)
@@ -513,7 +513,7 @@ func (m *tunnelManager) Close() error {
 	return m.tunnel.Close()
 }
 
-// runSOCKS5 runs a local SOCKS5 proxy that forwards through the tunnel.
+// runSOCKS5 运行本地 SOCKS5 代理，通过隧道转发流量。
 func (c *Client) runSOCKS5(manager *tunnelManager) error {
 	listener, err := net.Listen("tcp", c.ListenAddr)
 	if err != nil {
@@ -534,7 +534,7 @@ func (c *Client) runSOCKS5(manager *tunnelManager) error {
 	}
 }
 
-// handleSOCKS5Conn handles a single SOCKS5 connection.
+// handleSOCKS5Conn 处理单个 SOCKS5 连接。
 func (c *Client) handleSOCKS5Conn(clientConn net.Conn, manager *tunnelManager) {
 	defer clientConn.Close()
 
@@ -543,13 +543,13 @@ func (c *Client) handleSOCKS5Conn(clientConn net.Conn, manager *tunnelManager) {
 		return
 	}
 
-	// SOCKS5 handshake
+	// SOCKS5 握手
 	if err := c.socks5Handshake(clientConn); err != nil {
 		c.Logger.Debug("SOCKS5 handshake failed", "error", err)
 		return
 	}
 
-	// Read connect request
+	// 读取连接请求
 	targetAddr, err := c.socks5ReadRequest(clientConn)
 	if err != nil {
 		c.Logger.Debug("SOCKS5 request failed", "error", err)
@@ -562,7 +562,7 @@ func (c *Client) handleSOCKS5Conn(clientConn net.Conn, manager *tunnelManager) {
 
 	c.Logger.Debug("SOCKS5 connect", "target", targetAddr)
 
-	// Open a tunnel stream to the target via the relay
+	// 通过中继打开到目标的隧道流
 	tc, err := manager.getTunnel()
 	if err != nil {
 		c.Logger.Debug("tunnel unavailable", "error", err)
@@ -581,13 +581,13 @@ func (c *Client) handleSOCKS5Conn(clientConn net.Conn, manager *tunnelManager) {
 			return
 		}
 	}
-	// Send SOCKS5 success reply
+	// 发送 SOCKS5 成功响应
 	if err := c.socks5SendReply(clientConn, 0x00); err != nil {
 		stream.Close()
 		return
 	}
 
-	// Bidirectional relay between SOCKS5 client and tunnel stream
+	// SOCKS5 客户端和隧道流之间的双向中继
 	relayBidirectional(clientConn, stream)
 }
 
@@ -618,9 +618,9 @@ func relayBidirectional(clientConn net.Conn, stream io.ReadWriteCloser) {
 	wg.Wait()
 }
 
-// socks5Handshake performs the SOCKS5 authentication handshake.
+// socks5Handshake 执行 SOCKS5 认证握手。
 func (c *Client) socks5Handshake(conn net.Conn) error {
-	// Read auth methods
+	// 读取认证方法
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return err
@@ -631,7 +631,7 @@ func (c *Client) socks5Handshake(conn net.Conn) error {
 		return err
 	}
 
-	// Reply with no auth (0x00)
+	// 回复无需认证（0x00）
 	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
 		return err
 	}
@@ -639,19 +639,19 @@ func (c *Client) socks5Handshake(conn net.Conn) error {
 	return nil
 }
 
-// socks5ReadRequest reads the SOCKS5 connect request.
+// socks5ReadRequest 读取 SOCKS5 连接请求。
 func (c *Client) socks5ReadRequest(conn net.Conn) (string, error) {
-	// Read fixed header
+	// 读取固定头部
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return "", err
 	}
 
-	if header[0] != 0x05 || header[1] != 0x01 { // Must be CONNECT
+	if header[0] != 0x05 || header[1] != 0x01 { // 必须是 CONNECT
 		return "", fmt.Errorf("unsupported SOCKS5 command: %d", header[1])
 	}
 
-	// Read address
+	// 读取地址
 	var addr string
 	switch header[3] {
 	case 0x01: // IPv4
@@ -665,7 +665,7 @@ func (c *Client) socks5ReadRequest(conn net.Conn) (string, error) {
 		}
 		addr = fmt.Sprintf("%s:%d", net.IP(ip), int(port[0])<<8|int(port[1]))
 
-	case 0x03: // Domain name
+	case 0x03: // 域名
 		lenBuf := make([]byte, 1)
 		if _, err := io.ReadFull(conn, lenBuf); err != nil {
 			return "", err
@@ -687,20 +687,20 @@ func (c *Client) socks5ReadRequest(conn net.Conn) (string, error) {
 	return addr, nil
 }
 
-// socks5SendReply sends a SOCKS5 reply.
+// socks5SendReply 发送 SOCKS5 响应。
 func (c *Client) socks5SendReply(conn net.Conn, code byte) error {
 	reply := []byte{0x05, code, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 	_, err := conn.Write(reply)
 	return err
 }
 
-// streamFrame is a frame received for a specific H2 stream.
+// streamFrame 是为特定 H2 流接收的帧。
 type streamFrame struct {
 	fh      *h2engine.FrameHeader
 	payload []byte
 }
 
-// tunnelConn wraps the raw TCP connection with H2 stream multiplexing.
+// tunnelConn 使用 H2 流多路复用包装原始 TCP 连接。
 type tunnelConn struct {
 	net.Conn
 	h2Engine      *h2engine.Engine
@@ -720,7 +720,7 @@ type tunnelConn struct {
 	deadOnce  sync.Once
 }
 
-// newTunnelConn creates a tunnelConn and starts its frame dispatcher.
+// newTunnelConn 创建 tunnelConn 并启动其帧分发器。
 func newTunnelConn(rawConn net.Conn, h2Eng *h2engine.Engine, recReader *record.RecordReader, recWriter *record.RecordWriter, prof *profile.Model, paddingTarget int, dilutionProv *dilution.Provider) *tunnelConn {
 	tc := &tunnelConn{
 		Conn:          rawConn,
@@ -780,7 +780,7 @@ func (tc *tunnelConn) markDead(err error) {
 	})
 }
 
-// dispatchFrames reads frames from the H2 engine and routes them to per-stream channels.
+// dispatchFrames 从 H2 引擎读取帧并路由到每个流的通道。
 func (tc *tunnelConn) dispatchFrames() {
 	tc.Conn.SetReadDeadline(time.Now().Add(tunnelIdleTimeout))
 
@@ -830,9 +830,9 @@ func (tc *tunnelConn) deliverFrame(fh *h2engine.FrameHeader, payload []byte) boo
 	}
 }
 
-// dilutionLoop periodically sends dilution records carrying real HTTP content
-// to maintain semantic indistinguishability under DPI. It uses the traffic
-// profile's delay distribution for timing and record size distribution for sizing.
+// dilutionLoop 定期发送携带真实 HTTP 内容的稀释记录
+// 以保持 DPI 下的语义不可区分性。它使用流量
+// 配置文件的延迟分布来控制时序，记录大小分布来控制大小。
 func (tc *tunnelConn) dilutionLoop() {
 	interval := tc.profile.RecordDelay()
 	if interval <= 0 {
@@ -858,7 +858,7 @@ func (tc *tunnelConn) dilutionLoop() {
 				return
 			}
 
-			// Resample interval for natural jitter
+			// 重新采样间隔以产生自然抖动
 			nextInterval := tc.profile.RecordDelay()
 			if nextInterval > 0 {
 				ticker.Reset(nextInterval)
@@ -867,7 +867,7 @@ func (tc *tunnelConn) dilutionLoop() {
 	}
 }
 
-// openStream opens a new H2 stream and sends a CONNECT command to the relay.
+// openStream 打开一个新的 H2 流并向中继发送 CONNECT 命令。
 func (tc *tunnelConn) openStream(dest string) (*tunnelStream, error) {
 	streamID := tc.h2Engine.OpenStream()
 	ch := make(chan *streamFrame, 16)
@@ -876,7 +876,7 @@ func (tc *tunnelConn) openStream(dest string) (*tunnelStream, error) {
 	tc.streams[streamID] = ch
 	tc.mu.Unlock()
 
-	// Send CONNECT command
+	// 发送 CONNECT 命令
 	connectCmd := make([]byte, 1+len(dest))
 	connectCmd[0] = 0x01
 	copy(connectCmd[1:], dest)
@@ -887,7 +887,7 @@ func (tc *tunnelConn) openStream(dest string) (*tunnelStream, error) {
 		return nil, err
 	}
 
-	// Wait for CONNECT_OK
+	// 等待 CONNECT_OK
 	timeout := time.NewTimer(10 * time.Second)
 	defer timeout.Stop()
 	for {
@@ -924,7 +924,7 @@ func (tc *tunnelConn) openStream(dest string) (*tunnelStream, error) {
 	}
 }
 
-// tunnelStream is a single H2 stream within the tunnel.
+// tunnelStream 是隧道内的单个 H2 流。
 type tunnelStream struct {
 	tc       *tunnelConn
 	streamID uint32
@@ -932,7 +932,7 @@ type tunnelStream struct {
 	readBuf  []byte
 }
 
-// Read reads data from the stream, stripping the 0x02 DATA prefix.
+// Read 从流中读取数据，剥离 0x02 DATA 前缀。
 func (ts *tunnelStream) Read(p []byte) (int, error) {
 	if len(ts.readBuf) > 0 {
 		n := copy(p, ts.readBuf)
@@ -971,9 +971,9 @@ func (ts *tunnelStream) Read(p []byte) (int, error) {
 	return 0, nil
 }
 
-// Write writes data to the stream, prefixing with 0x02 DATA command.
-// If a traffic profile is configured, the record is padded to match
-// the target size distribution.
+// Write 将数据写入流，加上 0x02 DATA 命令前缀。
+// 如果配置了流量配置文件，记录会被填充以匹配
+// 目标大小分布。
 func (ts *tunnelStream) Write(p []byte) (int, error) {
 	var targetSize uint16
 	if ts.tc.profile != nil {
@@ -1007,7 +1007,7 @@ func (ts *tunnelStream) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Close sends a CLOSE command and unregisters the stream.
+// Close 发送 CLOSE 命令并注销流。
 func (ts *tunnelStream) Close() error {
 	ts.tc.h2Engine.WriteData(ts.streamID, []byte{0x03}, false)
 	ts.tc.mu.Lock()

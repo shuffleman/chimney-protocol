@@ -1,11 +1,11 @@
-// Package pcap provides a minimal pcap file parser for the calibrate tool.
+// Package pcap 为校准工具提供最小的 pcap 文件解析器。
 //
-// It handles:
-//   - PCAP global header and packet iteration
-//   - IPv4 + TCP header parsing
-//   - TCP stream reassembly (single-direction, in-order)
-//   - TLS record extraction (plaintext headers only — no decryption)
-//   - NSS SSLKEYLOGFILE parsing for optional decryption
+// 它处理：
+//   - PCAP 全局头和包迭代
+//   - IPv4 + TCP 头解析
+//   - TCP 流重组（单方向，有序）
+//   - TLS 记录提取（仅明文头 — 不解密）
+//   - NSS SSLKEYLOGFILE 解析用于可选解密
 package pcap
 
 import (
@@ -18,23 +18,23 @@ import (
 	"time"
 )
 
-// LinkType values from pcap global header.
+// pcap 全局头的链路类型值。
 const (
 	LinkTypeEthernet = 1
 )
 
-// Common EtherTypes.
+// 常见 EtherType。
 const (
 	EtherTypeIPv4 = 0x0800
 	EtherTypeIPv6 = 0x86DD
 )
 
-// IP protocol numbers.
+// IP 协议号。
 const (
 	IPProtocolTCP = 6
 )
 
-// TLS record content types and versions.
+// TLS 记录内容类型和版本。
 const (
 	TLSRecordChangeCipherSpec = 0x14
 	TLSRecordAlert            = 0x15
@@ -45,7 +45,7 @@ const (
 	TLSVersion13 = 0x0304
 )
 
-// PcapGlobalHeader is the 24-byte global header in a pcap file.
+// PcapGlobalHeader 是 pcap 文件中的 24 字节全局头。
 type PcapGlobalHeader struct {
 	MagicNumber  uint32
 	VersionMajor uint16
@@ -56,7 +56,7 @@ type PcapGlobalHeader struct {
 	Network      uint32
 }
 
-// PcapPacketHeader is the 16-byte per-packet header.
+// PcapPacketHeader 是 16 字节的每包头部。
 type PcapPacketHeader struct {
 	TsSec   uint32
 	TsUsec  uint32
@@ -64,41 +64,41 @@ type PcapPacketHeader struct {
 	OrigLen uint32
 }
 
-// Timestamp returns the packet timestamp.
+// Timestamp 返回包的时间戳。
 func (ph *PcapPacketHeader) Timestamp() time.Time {
 	return time.Unix(int64(ph.TsSec), int64(ph.TsUsec)*1000)
 }
 
-// TCPPacket represents a parsed TCP segment from a pcap packet.
+// TCPPacket 表示从 pcap 包解析的 TCP 段。
 type TCPPacket struct {
-	Timestamp  time.Time
-	SrcIP      [4]byte
-	DstIP      [4]byte
-	SrcPort    uint16
-	DstPort    uint16
-	SeqNum     uint32
-	Payload    []byte
-	Direction  int // 0 = client→server, 1 = server→client
+	Timestamp time.Time
+	SrcIP     [4]byte
+	DstIP     [4]byte
+	SrcPort   uint16
+	DstPort   uint16
+	SeqNum    uint32
+	Payload   []byte
+	Direction int // 0 = 客户端→服务器, 1 = 服务器→客户端
 }
 
-// TLSRecord represents a TLS record extracted from TCP stream.
+// TLSRecord 表示从 TCP 流中提取的 TLS 记录。
 type TLSRecord struct {
 	ContentType uint8
 	Version     uint16
 	Length      uint16
-	Payload     []byte // Copy of ciphertext (no decryption key)
+	Payload     []byte // 密文副本（无解密密钥）
 	Timestamp   time.Time
-	Direction   int // 0 = client→server (uplink), 1 = server→client (downlink)
+	Direction   int // 0 = 客户端→服务器（上行）, 1 = 服务器→客户端（下行）
 }
 
-// HandshakeMessage represents a parsed TLS handshake message.
+// HandshakeMessage 表示解析后的 TLS 握手消息。
 type HandshakeMessage struct {
 	Type    uint8
 	Length  uint32 // 24-bit
 	Payload []byte
 }
 
-// Parser reads and parses a pcap file.
+// Parser 读取并解析 pcap 文件。
 type Parser struct {
 	file        *os.File
 	reader      *bufio.Reader
@@ -107,7 +107,7 @@ type Parser struct {
 	packetCount int
 }
 
-// Open opens a pcap file for reading.
+// Open 打开一个 pcap 文件进行读取。
 func Open(path string) (*Parser, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -116,7 +116,7 @@ func Open(path string) (*Parser, error) {
 
 	reader := bufio.NewReader(f)
 
-	// Read global header
+	// 读取全局头
 	var hdr [24]byte
 	if _, err := io.ReadFull(reader, hdr[:]); err != nil {
 		f.Close()
@@ -133,14 +133,14 @@ func Open(path string) (*Parser, error) {
 		Network:      binary.BigEndian.Uint32(hdr[20:24]),
 	}
 
-	// Determine byte order from magic number
+	// 从幻数确定字节序
 	var byteOrder binary.ByteOrder
 	switch gh.MagicNumber {
 	case 0xa1b2c3d4:
 		byteOrder = binary.BigEndian
 	case 0xd4c3b2a1:
 		byteOrder = binary.LittleEndian
-		// Re-read fields in little-endian
+		// 以小端序重新读取字段
 		gh.MagicNumber = binary.LittleEndian.Uint32(hdr[0:4])
 		gh.VersionMajor = binary.LittleEndian.Uint16(hdr[4:6])
 		gh.VersionMinor = binary.LittleEndian.Uint16(hdr[6:8])
@@ -161,18 +161,18 @@ func Open(path string) (*Parser, error) {
 	}, nil
 }
 
-// Close closes the pcap file.
+// Close 关闭 pcap 文件。
 func (p *Parser) Close() error {
 	return p.file.Close()
 }
 
-// Network returns the link layer type.
+// Network 返回链路层类型。
 func (p *Parser) Network() uint32 {
 	return p.globalHdr.Network
 }
 
-// NextPacket reads the next packet from the pcap file.
-// Returns nil, io.EOF when done.
+// NextPacket 从 pcap 文件读取下一个包。
+// 读取完毕时返回 nil, io.EOF。
 func (p *Parser) NextPacket() (*PcapPacketHeader, []byte, error) {
 	var phdr [16]byte
 	_, err := io.ReadFull(p.reader, phdr[:])
@@ -196,8 +196,8 @@ func (p *Parser) NextPacket() (*PcapPacketHeader, []byte, error) {
 	return ph, payload, nil
 }
 
-// ParseTCPPacket parses a raw packet into a TCPPacket.
-// Handles Ethernet → IPv4 → TCP layering.
+// ParseTCPPacket 将原始包解析为 TCPPacket。
+// 处理 Ethernet → IPv4 → TCP 分层。
 func (p *Parser) ParseTCPPacket(ph *PcapPacketHeader, raw []byte) (*TCPPacket, error) {
 	if p.globalHdr.Network != LinkTypeEthernet {
 		return nil, fmt.Errorf("pcap: unsupported link type %d", p.globalHdr.Network)
@@ -217,7 +217,7 @@ func (p *Parser) ParseTCPPacket(ph *PcapPacketHeader, raw []byte) (*TCPPacket, e
 		return nil, errors.New("pcap: packet too short for IP header")
 	}
 
-	// Parse IPv4 header
+	// 解析 IPv4 头
 	versionIHL := raw[ipStart]
 	ihl := (versionIHL & 0x0F) * 4 // IHL in 32-bit words
 	protocol := raw[ipStart+9]
@@ -255,7 +255,7 @@ func (p *Parser) ParseTCPPacket(ph *PcapPacketHeader, raw []byte) (*TCPPacket, e
 	}, nil
 }
 
-// FilterTCP filters packets by destination port and returns parsed TCP packets.
+// FilterTCP 按目标端口过滤包并返回解析后的 TCP 包。
 func (p *Parser) FilterTCP(port uint16) ([]*TCPPacket, error) {
 	var packets []*TCPPacket
 	for {
@@ -269,15 +269,15 @@ func (p *Parser) FilterTCP(port uint16) ([]*TCPPacket, error) {
 
 		tcp, err := p.ParseTCPPacket(ph, raw)
 		if err != nil {
-			continue // Skip non-TCP packets
+			continue // 跳过非 TCP 包
 		}
 
 		if tcp.DstPort == port || tcp.SrcPort == port {
-			// Determine direction: first packet to the port is client→server
+			// 确定方向：发往端口的第一个包是客户端→服务器
 			if tcp.DstPort == port {
-				tcp.Direction = 0 // client→server
+				tcp.Direction = 0 // 客户端→服务器
 			} else {
-				tcp.Direction = 1 // server→client
+				tcp.Direction = 1 // 服务器→客户端
 			}
 			packets = append(packets, tcp)
 		}
@@ -285,8 +285,8 @@ func (p *Parser) FilterTCP(port uint16) ([]*TCPPacket, error) {
 	return packets, nil
 }
 
-// ExtractTLSRecords parses a reassembled TCP stream and extracts TLS records.
-// The stream must be from a single direction (client→server or server→client).
+// ExtractTLSRecords 解析重组后的 TCP 流并提取 TLS 记录。
+// 流必须来自单一方向（客户端→服务器或服务器→客户端）。
 func ExtractTLSRecords(stream []byte, direction int, baseTime time.Time, packetTimes []time.Time) []TLSRecord {
 	var records []TLSRecord
 	timeIdx := 0
@@ -296,18 +296,18 @@ func ExtractTLSRecords(stream []byte, direction int, baseTime time.Time, packetT
 		version := binary.BigEndian.Uint16(stream[1:3])
 		length := binary.BigEndian.Uint16(stream[3:5])
 
-		// Sanity checks
-		if length > 16384+256 { // Max TLS record is 16KB + some overhead
+		// 合理性检查
+		if length > 16384+256 { // 最大 TLS 记录为 16KB 加一些开销
 			break
 		}
 		if contentType < 20 || contentType > 23 {
-			// Not a valid TLS record — skip byte and retry
+			// 不是有效的 TLS 记录 — 跳过一个字节重试
 			stream = stream[1:]
 			continue
 		}
 
 		if int(length)+5 > len(stream) {
-			break // Incomplete record
+			break // 不完整的记录
 		}
 
 		rec := TLSRecord{
@@ -319,7 +319,7 @@ func ExtractTLSRecords(stream []byte, direction int, baseTime time.Time, packetT
 		}
 		copy(rec.Payload, stream[5:5+length])
 
-		// Assign best-effort timestamp
+		// 分配尽力而为的时间戳
 		if timeIdx < len(packetTimes) {
 			rec.Timestamp = packetTimes[timeIdx]
 			timeIdx++
@@ -334,7 +334,7 @@ func ExtractTLSRecords(stream []byte, direction int, baseTime time.Time, packetT
 	return records
 }
 
-// ParseHandshakeMessage parses a TLS handshake message from handshake record payload.
+// ParseHandshakeMessage 从握手记录负载解析 TLS 握手消息。
 func ParseHandshakeMessage(payload []byte) (*HandshakeMessage, error) {
 	if len(payload) < 4 {
 		return nil, errors.New("pcap: handshake message too short")
@@ -347,30 +347,30 @@ func ParseHandshakeMessage(payload []byte) (*HandshakeMessage, error) {
 	}, nil
 }
 
-// Direction constants for FilterDirection.
+// 方向常量，用于 FilterDirection。
 const (
 	DirBoth = iota
 	DirClientToServer
 	DirServerToClient
 )
 
-// FilteredStream holds reassembled TCP streams separated by direction.
+// FilteredStream 保存按方向分离的重组 TCP 流。
 type FilteredStream struct {
 	ClientToServer []byte
 	ServerToClient []byte
 
-	// Timestamps at which data arrived (for timing analysis)
+	// 数据到达时的时间戳（用于时序分析）
 	ClientTimestamps []time.Time
 	ServerTimestamps []time.Time
 
-	// ServerPort is the port the server listens on
+	// ServerPort 是服务器监听的端口
 	ServerPort uint16
 }
 
-// ReassembleStreams opens a pcap, filters TCP packets for a port, and reassembles
-// streams in each direction. This is a simplified reassembly that assumes:
-//   - Packets arrive in order (valid for captured pcap files)
-//   - Single TCP connection (first seen 5-tuple wins)
+// ReassembleStreams 打开 pcap，过滤端口的 TCP 包，并按方向重组流。
+// 这是一个简化版的重组，假设：
+//   - 包按顺序到达（对抓取的 pcap 文件有效）
+//   - 单一 TCP 连接（首次出现的五元组获胜）
 func ReassembleStreams(pcapPath string, serverPort uint16) (*FilteredStream, error) {
 	p, err := Open(pcapPath)
 	if err != nil {
@@ -400,7 +400,7 @@ func ReassembleStreams(pcapPath string, serverPort uint16) (*FilteredStream, err
 			continue
 		}
 
-		// Filter by port
+		// 按端口过滤
 		if tcp.DstPort != serverPort && tcp.SrcPort != serverPort {
 			continue
 		}
@@ -420,7 +420,7 @@ func ReassembleStreams(pcapPath string, serverPort uint16) (*FilteredStream, err
 			initialized = true
 		}
 
-		// Check if this packet belongs to our connection
+		// 检查此包是否属于我们的连接
 		isClientToServer := tcp.SrcIP == clientIP && tcp.DstIP == serverIP &&
 			tcp.SrcPort == clientPort && tcp.DstPort == serverPortSeen
 		isServerToClient := tcp.SrcIP == serverIP && tcp.DstIP == clientIP &&
@@ -438,15 +438,15 @@ func ReassembleStreams(pcapPath string, serverPort uint16) (*FilteredStream, err
 	return fs, nil
 }
 
-// NSSKeyLog represents a parsed NSS SSLKEYLOGFILE entry.
+// NSSKeyLog 表示解析后的 NSS SSLKEYLOGFILE 条目。
 type NSSKeyLog struct {
-	Label      string
+	Label        string
 	ClientRandom []byte
-	Secret     []byte
+	Secret       []byte
 }
 
-// ParseNSSKeyLog parses an NSS-style SSLKEYLOGFILE.
-// Format: <Label> <ClientRandom_hex> <Secret_hex>
+// ParseNSSKeyLog 解析 NSS 风格的 SSLKEYLOGFILE。
+// 格式：<Label> <ClientRandom_hex> <Secret_hex>
 func ParseNSSKeyLog(path string) ([]NSSKeyLog, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -487,7 +487,7 @@ func ParseNSSKeyLog(path string) ([]NSSKeyLog, error) {
 	return entries, scanner.Err()
 }
 
-// hexDecode decodes a hex string to bytes.
+// hexDecode 将 hex 字符串解码为字节。
 func hexDecode(s string) ([]byte, error) {
 	result := make([]byte, len(s)/2)
 	for i := 0; i < len(s); i += 2 {
@@ -500,7 +500,7 @@ func hexDecode(s string) ([]byte, error) {
 	return result, nil
 }
 
-// ExtractClientRandom extracts ClientRandom from reassembled ClientHello bytes.
+// ExtractClientRandom 从重组的 ClientHello 字节中提取 ClientRandom。
 func ExtractClientRandom(clientHelloPayload []byte) ([]byte, error) {
 	hm, err := ParseHandshakeMessage(clientHelloPayload)
 	if err != nil {
@@ -517,18 +517,18 @@ func ExtractClientRandom(clientHelloPayload []byte) ([]byte, error) {
 	return cr, nil
 }
 
-// TLS overhead estimates for different versions and ciphers.
+// TLS 不同版本和密码套件的开销估算。
 const (
-	// TLS 1.2 GCM overhead: 8 byte explicit nonce + 16 byte tag.
+	// TLS 1.2 GCM 开销：8 字节显式 nonce + 16 字节标签。
 	TLS12GCMOverhead = 24
 
-	// TLS 1.3 overhead: 1 byte inner content type + 16 byte tag.
-	// Plus the 5-byte outer record header.
+	// TLS 1.3 开销：1 字节内部内容类型 + 16 字节标签。
+	// 加上 5 字节外部记录头。
 	TLS13Overhead = 17
 )
 
-// EstimatePlaintextSize estimates plaintext size from TLS record size.
-// This is heuristic — actual overhead depends on cipher suite.
+// EstimatePlaintextSize 从 TLS 记录大小估算明文大小。
+// 这是启发式的 — 实际开销取决于密码套件。
 func EstimatePlaintextSize(recordLength uint16, version uint16) int {
 	if version == TLSVersion13 {
 		return int(recordLength) - TLS13Overhead

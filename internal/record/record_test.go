@@ -54,13 +54,13 @@ func TestCodec_EncodeDecode(t *testing.T) {
 		t.Fatalf("NewCodec failed: %v", err)
 	}
 
-	// Test with various payload sizes
+	// 使用各种负载大小进行测试
 	testSizes := []int{
-		0,       // empty
-		1,       // 1 byte
-		16,      // one block
-		1024,    // 1 KiB
-		16384,   // 16 KiB (max plaintext)
+		0,     // 空
+		1,     // 1 字节
+		16,    // 一个块
+		1024,  // 1 KiB
+		16384, // 16 KiB（最大明文）
 	}
 
 	for _, size := range testSizes {
@@ -70,13 +70,13 @@ func TestCodec_EncodeDecode(t *testing.T) {
 				t.Fatalf("Failed to generate plaintext: %v", err)
 			}
 
-			// Reset sequence numbers for each test
+			// 为每个测试重置序列号
 			codec2, _ := NewCodec(key, nonce)
 
-			// Encode
+			// 编码
 			record := codec2.EncodeRecord(plaintext)
 
-			// Verify record structure
+			// 验证记录结构
 			if len(record) < RecordHeaderLen {
 				t.Fatalf("Record too short: %d bytes", len(record))
 			}
@@ -87,7 +87,7 @@ func TestCodec_EncodeDecode(t *testing.T) {
 				t.Errorf("Record version = 0x%02x%02x, want 0x0303", record[1], record[2])
 			}
 
-			// Decode
+			// 解码
 			result, err := codec2.DecodeRecord(record)
 			if err != nil {
 				t.Fatalf("DecodeRecord failed: %v", err)
@@ -110,12 +110,12 @@ func TestCodec_SequenceIncrement(t *testing.T) {
 	codec, _ := NewCodec(key, nonce)
 	plaintext := []byte("test data")
 
-	// Encode multiple records
+	// 编码多条记录
 	for i := 0; i < 5; i++ {
 		_ = codec.EncodeRecord(plaintext)
 	}
 
-	// Sealer sequence should be 5
+	// Sealer 序列号应为 5
 	if codec.sealer.Sequence() != 5 {
 		t.Errorf("Sealer seq after 5 encodes = %d, want 5", codec.sealer.Sequence())
 	}
@@ -127,8 +127,8 @@ func TestCodec_DirectionalKeys(t *testing.T) {
 	nonce1 := generateTestNonce(t)
 	nonce2 := generateTestNonce(t)
 
-	// Client uses key1 for sending, key2 for receiving
-	// Server uses key2 for sending, key1 for receiving
+	// 客户端使用 key1 发送，key2 接收
+	// 服务端使用 key2 发送，key1 接收
 	clientCodec, err := NewCodecWithDirectionalKeys(key1, nonce1, key2, nonce2)
 	if err != nil {
 		t.Fatalf("NewCodecWithDirectionalKeys failed: %v", err)
@@ -141,10 +141,10 @@ func TestCodec_DirectionalKeys(t *testing.T) {
 
 	plaintext := []byte("hello directional keys")
 
-	// Client encodes
+	// 客户端编码
 	record := clientCodec.EncodeRecord(plaintext)
 
-	// Server decodes
+	// 服务端解码
 	result, err := serverCodec.DecodeRecord(record)
 	if err != nil {
 		t.Fatalf("Server decode failed: %v", err)
@@ -171,15 +171,15 @@ func TestDecodeRecord_InvalidType(t *testing.T) {
 	nonce := generateTestNonce(t)
 	codec, _ := NewCodec(key, nonce)
 
-	// Create a record with wrong type
+	// 创建一条错误类型的记录
 	plaintext := []byte("test")
 	record := codec.EncodeRecord(plaintext)
 	record[0] = 0x16 // Change to handshake type
 
 	// Need to re-encode with the modified type or test differently
-	// Since EncodeRecord always uses 0x17, let's test with a manually crafted record
+	// 由于 EncodeRecord 始终使用 0x17，我们手动构造一条记录测试
 	_, err := codec.DecodeRecord(record)
-	// This should fail with bad MAC since we tampered with the additional data
+	// 因为我们篡改了附加数据，这应失败并返回 bad MAC
 	if err == nil {
 		t.Error("Expected error for tampered record type, got nil")
 	}
@@ -222,7 +222,7 @@ func TestRecordWriter_RecordReader(t *testing.T) {
 	nonce := generateTestNonce(t)
 	codec, _ := NewCodec(key, nonce)
 
-	// Use a pipe to simulate network
+	// 使用管道模拟网络
 	pr, pw := io.Pipe()
 
 	recWriter := NewRecordWriter(pw, codec)
@@ -230,7 +230,7 @@ func TestRecordWriter_RecordReader(t *testing.T) {
 
 	plaintext := []byte("round-trip test data")
 
-	// Write in background
+	// 在后台写入
 	go func() {
 		if err := recWriter.WriteRecord(plaintext); err != nil {
 			t.Errorf("WriteRecord failed: %v", err)
@@ -238,7 +238,7 @@ func TestRecordWriter_RecordReader(t *testing.T) {
 		pw.Close()
 	}()
 
-	// Read
+	// 读取
 	decoded, err := recReader.ReadRecord()
 	if err != nil {
 		t.Fatalf("ReadRecord failed: %v", err)
@@ -257,7 +257,7 @@ func TestRecordWriter_WriteErrorRollsBackSeq(t *testing.T) {
 	pr, pw := io.Pipe()
 	recWriter := NewRecordWriter(pw, codec)
 
-	// Write one record successfully and drain it so the pipe doesn't block.
+	// 成功写入一条记录并排空管道，使其不会阻塞。
 	done := make(chan struct{})
 	go func() {
 		recReader := NewRecordReader(pr, codec)
@@ -278,23 +278,23 @@ func TestRecordWriter_WriteErrorRollsBackSeq(t *testing.T) {
 		t.Fatalf("expected seq=1 after one write, got %d", seqAfter)
 	}
 
-	// Close the pipe to simulate transport failure.
+	// 关闭管道以模拟传输故障。
 	pw.Close()
 
-	// This write will fail because the pipe is closed.
+	// 此写入将失败，因为管道已关闭。
 	err := recWriter.WriteRecord([]byte("record-1"))
 	if err == nil {
 		t.Fatal("expected error after pipe close, got nil")
 	}
 	t.Logf("WriteRecord error: %v", err)
 
-	// Counter must be rolled back — no bytes were written.
+	// 计数器必须回滚——未写入任何字节。
 	seqAfterFail := codec.sealer.Sequence()
 	if seqAfterFail != 1 {
 		t.Errorf("expected seq=1 after failed write (rolled back), got %d", seqAfterFail)
 	}
 
-	// Subsequent writes must return the broken error without touching the counter.
+	// 后续写入应返回损坏错误，而不触及计数器。
 	err2 := recWriter.WriteRecord([]byte("record-2"))
 	if err2 == nil {
 		t.Fatal("expected broken-writer error on second attempt")
@@ -307,8 +307,8 @@ func TestRecordWriter_WriteErrorRollsBackSeq(t *testing.T) {
 
 func TestKeyLen(t *testing.T) {
 	tests := []struct {
-		aead   string
-		want   int
+		aead string
+		want int
 	}{
 		{"AES-128-GCM", 16},
 		{"AES-256-GCM", 32},
@@ -326,8 +326,8 @@ func TestKeyLen(t *testing.T) {
 
 func TestNonceLen(t *testing.T) {
 	tests := []struct {
-		aead   string
-		want   int
+		aead string
+		want int
 	}{
 		{"AES-128-GCM", 12},
 		{"AES-256-GCM", 12},
@@ -356,9 +356,9 @@ func BenchmarkEncodeRecord(b *testing.B) {
 	}
 }
 
-// TestRecordWriter_PipeStress sends many full-size records through io.Pipe
-// to isolate whether record corruption is a codec issue or TCP-specific.
-// The record size matches the H2 max frame: 16384 payload + 9 H2 header = 16393 bytes plaintext.
+// TestRecordWriter_PipeStress 通过 io.Pipe 发送多个完整大小的记录
+// 以隔离记录损坏是编解码器问题还是 TCP 特定问题。
+// 记录大小匹配 H2 最大帧：16384 负载 + 9 H2 头部 = 16393 字节明文。
 func TestRecordWriter_PipeStress(t *testing.T) {
 	const numRecords = 100
 	const plaintextSize = 16384 + 9 // full H2 DATA frame
@@ -366,14 +366,14 @@ func TestRecordWriter_PipeStress(t *testing.T) {
 	key := generateTestKey(t)
 	nonce := generateTestNonce(t)
 	codec, _ := NewCodec(key, nonce)
-	// Fresh codec for reader — same key material
+	// 为读取器创建新的编解码器——相同的密钥材料
 	codec2, _ := NewCodec(key, nonce)
 
 	pr, pw := io.Pipe()
 	recWriter := NewRecordWriter(pw, codec)
 	recReader := NewRecordReader(pr, codec2)
 
-	// Prepare plaintexts
+	// 准备明文
 	plaintexts := make([][]byte, numRecords)
 	for i := range plaintexts {
 		p := make([]byte, plaintextSize)
@@ -417,7 +417,7 @@ func BenchmarkDecodeRecord(b *testing.B) {
 	rand.Reader.Read(plaintext)
 	record := codec.EncodeRecord(plaintext)
 
-	// Fresh codec for decoding
+	// 为解码创建新的编解码器
 	codec2, _ := NewCodec(key, nonce)
 
 	b.ResetTimer()

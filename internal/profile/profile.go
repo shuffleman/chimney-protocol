@@ -1,21 +1,20 @@
-// Package profile implements traffic profile modeling and pacing (Part III §4).
+// Package profile 实现流量配置文件的建模和调速（第三部分 §4）。
 //
-// The profile captures the observable characteristics of real HTTPS traffic
-// to a whitelisted site. The pacing engine then shapes Chimney tunnel traffic
-// to match this profile.
+// 配置文件捕获到白名单站点的真实 HTTPS 流量的可观测特征。
+// 调速引擎随后将 Chimney 隧道流量塑形以匹配此配置文件。
 //
-// Profile model:
+// 配置文件模型：
 //
 //	ProfileModel {
-//	    size_dist:       distribution of TLS record sizes
-//	    burst_size_dist: distribution of burst lengths (number of records per burst)
-//	    intra_burst_seq: pacing between records within a burst
-//	    gap_dist:        distribution of gaps between bursts ("think time")
-//	    dir_ratio:       ratio of uplink vs downlink records
+//	    size_dist:       TLS 记录大小的分布
+//	    burst_size_dist: 突发长度的分布（每次突发的记录数）
+//	    intra_burst_seq: 突发内记录间的调速
+//	    gap_dist:        突发之间间隔的分布（“思考时间”）
+//	    dir_ratio:       上行与下行记录的比例
 //	}
 //
-// The profile is calibrated once per site from pcap captures of real browser
-// sessions (Appendix B). See CalibrateFromPcap for the calibration procedure.
+// 配置文件通过真实浏览器会话的 pcap 捕获（附录 B）为每个站点校准一次。
+// 参见 CalibrateFromPcap 了解校准过程。
 package profile
 
 import (
@@ -28,45 +27,45 @@ import (
 )
 
 const (
-	// DefaultBursts is the default number of bursts for the shaping window.
+	// DefaultBursts 是塑形窗口的默认突发数。
 	DefaultBursts = 10
 
-	// DefaultRecordsPerBurst is the default number of records per burst.
+	// DefaultRecordsPerBurst 是每次突发的默认记录数。
 	DefaultRecordsPerBurst = 5
 
-	// DefaultIntraBurstDelay is the default delay between records in a burst.
+	// DefaultIntraBurstDelay 是突发内记录间的默认延迟。
 	DefaultIntraBurstDelay = 1 * time.Millisecond
 
-	// DefaultInterBurstGap is the default gap between bursts.
+	// DefaultInterBurstGap 是突发之间的默认间隔。
 	DefaultInterBurstGap = 10 * time.Millisecond
 )
 
-// SizeDistribution models the distribution of TLS record sizes.
-// Uses a histogram with log-normal-like properties (typical for HTTPS).
+// SizeDistribution 模拟 TLS 记录大小的分布。
+// 使用具有对数正态特性的直方图（HTTPS 典型特征）。
 type SizeDistribution struct {
-	// Min and Max record sizes (plaintext, before encryption overhead).
+	// Min 和 Max 记录大小（明文，加密开销前）。
 	Min uint16 `json:"min"`
 	Max uint16 `json:"max"`
 
-	// Mean and StdDev of the log-normal distribution.
+	// Mean 和 StdDev 为对数正态分布的参数。
 	Mean   float64 `json:"mean"`
 	StdDev float64 `json:"std_dev"`
 
-	// Histogram buckets for empirical distribution (optional, for precision).
+	// Histogram 桶，用于经验分布（可选，提高精度）。
 	Buckets []SizeBucket `json:"buckets,omitempty"`
 }
 
-// SizeBucket is a histogram bucket for record sizes.
+// SizeBucket 是记录大小的直方图桶。
 type SizeBucket struct {
 	Size  uint16  `json:"size"`
 	Count uint32  `json:"count"`
-	Prob  float64 `json:"prob"` // Normalized probability
+	Prob  float64 `json:"prob"` // 归一化概率
 }
 
-// Sample draws a random record size from the distribution.
+// Sample 从分布中随机抽取一个记录大小。
 func (sd *SizeDistribution) Sample() uint16 {
 	if len(sd.Buckets) > 0 {
-		// Use empirical histogram
+		// 使用经验直方图
 		r := rand.Float64()
 		cumsum := 0.0
 		for _, b := range sd.Buckets {
@@ -78,7 +77,7 @@ func (sd *SizeDistribution) Sample() uint16 {
 		return sd.Buckets[len(sd.Buckets)-1].Size
 	}
 
-	// Use log-normal approximation
+	// 使用对数正态近似
 	sample := sd.Mean + sd.StdDev*rand.NormFloat64()
 	size := uint16(math.Exp(sample))
 	if size < sd.Min {
@@ -90,18 +89,18 @@ func (sd *SizeDistribution) Sample() uint16 {
 	return size
 }
 
-// BurstDistribution models the distribution of burst sizes (records per burst).
+// BurstDistribution 模拟突发大小的分布（每次突发的记录数）。
 type BurstDistribution struct {
-	// Min and Max records per burst.
+	// Min 和 Max 每次突发的记录数。
 	Min uint16 `json:"min"`
 	Max uint16 `json:"max"`
 
-	// Mean and StdDev for the distribution.
+	// Mean 和 StdDev 为分布的参数。
 	Mean   float64 `json:"mean"`
 	StdDev float64 `json:"std_dev"`
 }
 
-// Sample draws a random burst length from the distribution.
+// Sample 从分布中随机抽取一个突发长度。
 func (bd *BurstDistribution) Sample() uint16 {
 	sample := bd.Mean + bd.StdDev*rand.NormFloat64()
 	length := uint16(sample)
@@ -114,18 +113,18 @@ func (bd *BurstDistribution) Sample() uint16 {
 	return length
 }
 
-// GapDistribution models the distribution of gaps between bursts (think time).
+// GapDistribution 模拟突发之间间隔的分布（思考时间）。
 type GapDistribution struct {
-	// Min and Max gap duration.
+	// Min 和 Max 间隔持续时间。
 	Min time.Duration `json:"min"`
 	Max time.Duration `json:"max"`
 
-	// Mean and StdDev in milliseconds.
+	// Mean 和 StdDev，以毫秒为单位。
 	MeanMs   float64 `json:"mean_ms"`
 	StdDevMs float64 `json:"std_dev_ms"`
 }
 
-// Sample draws a random gap duration from the distribution.
+// Sample 从分布中随机抽取一个间隔持续时间。
 func (gd *GapDistribution) Sample() time.Duration {
 	sample := gd.MeanMs + gd.StdDevMs*rand.NormFloat64()
 	ms := int64(sample)
@@ -138,30 +137,30 @@ func (gd *GapDistribution) Sample() time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// DirectionRatio controls the uplink/downlink record ratio.
+// DirectionRatio 控制上行/下行记录比例。
 type DirectionRatio struct {
-	// UplinkRatio is the fraction of records going client→relay.
-	// Range [0, 1]. DownlinkRatio = 1 - UplinkRatio.
+	// UplinkRatio 是客户端→中继的记录比例。
+	// 范围 [0, 1]。DownlinkRatio = 1 - UplinkRatio。
 	UplinkRatio float64 `json:"uplink_ratio"`
 }
 
-// IsUplink returns true for an uplink record based on the ratio.
+// IsUplink 根据比例返回是否为上行记录。
 func (dr *DirectionRatio) IsUplink() bool {
 	return rand.Float64() < dr.UplinkRatio
 }
 
-// IntraBurstPacing controls timing between records within a burst.
+// IntraBurstPacing 控制突发内记录间的时序。
 type IntraBurstPacing struct {
-	// Min and Max delay between consecutive records.
+	// Min 和 Max 连续记录间的延迟。
 	Min time.Duration `json:"min"`
 	Max time.Duration `json:"max"`
 
-	// Mean and StdDev in microseconds.
+	// Mean 和 StdDev，以微秒为单位。
 	MeanUs   float64 `json:"mean_us"`
 	StdDevUs float64 `json:"std_dev_us"`
 }
 
-// Sample draws a random intra-burst pacing delay.
+// Sample 随机抽取一个突发内调速延迟。
 func (ibp *IntraBurstPacing) Sample() time.Duration {
 	sample := ibp.MeanUs + ibp.StdDevUs*rand.NormFloat64()
 	us := int64(sample)
@@ -174,39 +173,39 @@ func (ibp *IntraBurstPacing) Sample() time.Duration {
 	return time.Duration(us) * time.Microsecond
 }
 
-// Model represents the complete traffic profile for a site.
+// Model 表示一个站点的完整流量配置文件。
 type Model struct {
-	// SiteName identifies which site this profile is for.
+	// SiteName 标识此配置文件对应的站点。
 	SiteName string `json:"site_name"`
 
-	// SizeDist is the record size distribution.
+	// SizeDist 是记录大小分布。
 	SizeDist *SizeDistribution `json:"size_dist"`
 
-	// BurstDist is the burst size distribution.
+	// BurstDist 是突发大小分布。
 	BurstDist *BurstDistribution `json:"burst_dist"`
 
-	// GapDist is the inter-burst gap distribution.
+	// GapDist 是突发间间隔分布。
 	GapDist *GapDistribution `json:"gap_dist"`
 
-	// DirRatio controls uplink/downlink mixing.
+	// DirRatio 控制上行/下行混合。
 	DirRatio *DirectionRatio `json:"dir_ratio"`
 
-	// IntraBurstPacing controls within-burst timing.
+	// IntraBurstPacing 控制突发内时序。
 	IntraBurstPacing *IntraBurstPacing `json:"intra_burst_pacing"`
 
-	// CalibratedAt records when this profile was last calibrated.
+	// CalibratedAt 记录此配置文件上次校准的时间。
 	CalibratedAt time.Time `json:"calibrated_at"`
 }
 
-// DefaultModel returns a conservative default profile.
-// This is used when no calibrated profile is available.
+// DefaultModel 返回一个保守的默认配置文件。
+// 当没有可用的校准配置文件时使用。
 func DefaultModel() *Model {
 	return &Model{
 		SiteName: "default",
 		SizeDist: &SizeDistribution{
 			Min:    128,
 			Max:    16384,
-			Mean:   8.0, // ~3KB median for log-normal
+			Mean:   8.0, // 对数正态 ~3KB 中位数
 			StdDev: 1.2,
 		},
 		BurstDist: &BurstDistribution{
@@ -234,7 +233,7 @@ func DefaultModel() *Model {
 	}
 }
 
-// SaveToFile saves the profile model to a JSON file.
+// SaveToFile 将配置文件模型保存到 JSON 文件。
 func (m *Model) SaveToFile(path string) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -246,7 +245,7 @@ func (m *Model) SaveToFile(path string) error {
 	return nil
 }
 
-// LoadModelFromFile loads a profile model from a JSON file.
+// LoadModelFromFile 从 JSON 文件加载配置文件模型。
 func LoadModelFromFile(path string) (*Model, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -260,7 +259,7 @@ func LoadModelFromFile(path string) (*Model, error) {
 	return &m, nil
 }
 
-// RecordSize returns a target record size for the next record.
+// RecordSize 返回下一个记录的目标记录大小。
 func (m *Model) RecordSize() uint16 {
 	if m.SizeDist == nil {
 		return 1024
@@ -268,7 +267,7 @@ func (m *Model) RecordSize() uint16 {
 	return m.SizeDist.Sample()
 }
 
-// BurstLength returns the number of records in the next burst.
+// BurstLength 返回下一个突发中的记录数。
 func (m *Model) BurstLength() uint16 {
 	if m.BurstDist == nil {
 		return 5
@@ -276,7 +275,7 @@ func (m *Model) BurstLength() uint16 {
 	return m.BurstDist.Sample()
 }
 
-// BurstGap returns the gap duration before the next burst.
+// BurstGap 返回下一个突发之前的间隔持续时间。
 func (m *Model) BurstGap() time.Duration {
 	if m.GapDist == nil {
 		return 10 * time.Millisecond
@@ -284,7 +283,7 @@ func (m *Model) BurstGap() time.Duration {
 	return m.GapDist.Sample()
 }
 
-// RecordDelay returns the delay before the next record within a burst.
+// RecordDelay 返回突发内下一个记录之前的延迟。
 func (m *Model) RecordDelay() time.Duration {
 	if m.IntraBurstPacing == nil {
 		return 500 * time.Microsecond
@@ -292,7 +291,7 @@ func (m *Model) RecordDelay() time.Duration {
 	return m.IntraBurstPacing.Sample()
 }
 
-// IsUplink returns true if the next record should be uplink.
+// IsUplink 返回下一个记录是否应为上行。
 func (m *Model) IsUplink() bool {
 	if m.DirRatio == nil {
 		return rand.Float64() < 0.4
@@ -300,40 +299,40 @@ func (m *Model) IsUplink() bool {
 	return m.DirRatio.IsUplink()
 }
 
-// CalibrateFromPcap calibrates a profile model from pcap analysis data.
-// This is a placeholder for the actual pcap parsing logic.
-// In production, this would parse pcap files and extract the distributions.
+// CalibrateFromPcap 从 pcap 分析数据校准配置文件模型。
+// 这是实际 pcap 解析逻辑的占位符。
+// 生产中，这将解析 pcap 文件并提取分布。
 //
-// The calibration procedure (Appendix B):
-//  1. Capture HTTPS traffic to the site using a real browser (uTLS-matched)
-//  2. Extract TLS record sizes, timing, and directions
-//  3. Fit distributions to the observed data
-//  4. Store alongside the SETTINGS snapshot
+// 校准过程（附录 B）：
+//  1. 使用真实浏览器（与 uTLS 匹配）捕获到站点的 HTTPS 流量
+//  2. 提取 TLS 记录大小、时序和方向
+//  3. 将分布拟合到观测数据
+//  4. 与 SETTINGS 快照一起存储
 func CalibrateFromPcap(siteName string, recordSizes []uint16, burstSizes []uint16, gaps []time.Duration) *Model {
 	m := &Model{
 		SiteName:     siteName,
 		CalibratedAt: time.Now(),
 	}
 
-	// Fit size distribution
+	// 拟合大小分布
 	if len(recordSizes) > 0 {
 		m.SizeDist = fitSizeDistribution(recordSizes)
 	}
 
-	// Fit burst distribution
+	// 拟合突发分布
 	if len(burstSizes) > 0 {
 		m.BurstDist = fitBurstDistribution(burstSizes)
 	}
 
-	// Fit gap distribution
+	// 拟合间隔分布
 	if len(gaps) > 0 {
 		m.GapDist = fitGapDistribution(gaps)
 	}
 
-	// Default direction ratio (typically ~40% uplink for web browsing)
+	// 默认方向比例（网页浏览通常约 40% 上行）
 	m.DirRatio = &DirectionRatio{UplinkRatio: 0.4}
 
-	// Default intra-burst pacing
+	// 默认突发内调速
 	m.IntraBurstPacing = &IntraBurstPacing{
 		Min:      100 * time.Microsecond,
 		Max:      5 * time.Millisecond,
@@ -344,13 +343,13 @@ func CalibrateFromPcap(siteName string, recordSizes []uint16, burstSizes []uint1
 	return m
 }
 
-// fitSizeDistribution fits a size distribution from observed data.
+// fitSizeDistribution 从观测数据拟合大小分布。
 func fitSizeDistribution(sizes []uint16) *SizeDistribution {
 	if len(sizes) == 0 {
 		return nil
 	}
 
-	// Compute min, max, mean, stddev on log-transformed sizes
+	// 计算对数变换后大小的最小值、最大值、均值、标准差
 	min := sizes[0]
 	max := sizes[0]
 	var sum float64
@@ -374,10 +373,10 @@ func fitSizeDistribution(sizes []uint16) *SizeDistribution {
 	}
 	stddev := math.Sqrt(sumSq / float64(len(sizes)))
 
-	// Build histogram buckets
+	// 构建直方图桶
 	bucketMap := make(map[uint16]uint32)
 	for _, s := range sizes {
-		// Round to nearest 256-byte bucket
+		// 四舍五入到最近的 256 字节桶
 		bucket := (s + 128) / 256 * 256
 		if bucket < 256 {
 			bucket = 256
@@ -404,7 +403,7 @@ func fitSizeDistribution(sizes []uint16) *SizeDistribution {
 	}
 }
 
-// fitBurstDistribution fits a burst size distribution.
+// fitBurstDistribution 拟合突发大小分布。
 func fitBurstDistribution(bursts []uint16) *BurstDistribution {
 	if len(bursts) == 0 {
 		return nil
@@ -439,7 +438,7 @@ func fitBurstDistribution(bursts []uint16) *BurstDistribution {
 	}
 }
 
-// fitGapDistribution fits a gap distribution.
+// fitGapDistribution 拟合间隔分布。
 func fitGapDistribution(gaps []time.Duration) *GapDistribution {
 	if len(gaps) == 0 {
 		return nil
@@ -474,19 +473,19 @@ func fitGapDistribution(gaps []time.Duration) *GapDistribution {
 	}
 }
 
-// Pacer implements traffic pacing according to a profile model.
+// Pacer 根据配置文件模型实现流量调速。
 type Pacer struct {
 	model *Model
 
-	// Control channels
+	// 控制通道
 	stopCh chan struct{}
 	doneCh chan struct{}
 
-	// Callback for when a record should be sent
+	// 发送记录时的回调
 	recordCallback func(size uint16, isUplink bool)
 }
 
-// NewPacer creates a new pacer with the given model and callback.
+// NewPacer 使用给定的模型和回调创建一个新的调速器。
 func NewPacer(model *Model, recordCallback func(size uint16, isUplink bool)) *Pacer {
 	return &Pacer{
 		model:          model,
@@ -496,26 +495,26 @@ func NewPacer(model *Model, recordCallback func(size uint16, isUplink bool)) *Pa
 	}
 }
 
-// Start begins the pacing loop.
+// Start 启动调速循环。
 func (p *Pacer) Start() {
 	go p.loop()
 }
 
-// Stop stops the pacing loop.
+// Stop 停止调速循环。
 func (p *Pacer) Stop() {
 	close(p.stopCh)
 	<-p.doneCh
 }
 
-// loop runs the pacing algorithm (§4.2):
+// loop 运行调速算法（§4.2）：
 //
 //	loop:
 //	  burst_len ~ burst_size_dist
 //	  repeat burst_len:
-//	     target ~ size_dist; assemble tunnel|padding to target, seal record, send
+//	     target ~ size_dist; 组装隧道|填充至 target, 密封记录, 发送
 //	     sleep(intra_burst_pacing)
 //	  gap ~ gap_dist; sleep(gap)
-//	  schedule direction per dir_ratio
+//	  按 dir_ratio 调度方向
 func (p *Pacer) loop() {
 	defer close(p.doneCh)
 
@@ -526,10 +525,10 @@ func (p *Pacer) loop() {
 		default:
 		}
 
-		// Determine burst length
+		// 确定突发长度
 		burstLen := p.model.BurstLength()
 
-		// Send burst
+		// 发送突发
 		for i := uint16(0); i < burstLen; i++ {
 			select {
 			case <-p.stopCh:
@@ -544,14 +543,14 @@ func (p *Pacer) loop() {
 				p.recordCallback(targetSize, isUplink)
 			}
 
-			// Intra-burst pacing
-			if i < burstLen-1 { // No delay after last record
+			// 突发内调速
+			if i < burstLen-1 { // 最后一个记录后无延迟
 				delay := p.model.RecordDelay()
 				time.Sleep(delay)
 			}
 		}
 
-		// Inter-burst gap
+		// 突发间间隔
 		gap := p.model.BurstGap()
 		select {
 		case <-p.stopCh:
@@ -561,17 +560,17 @@ func (p *Pacer) loop() {
 	}
 }
 
-// ShapingWindow represents a window of shaped traffic.
-// Used during the initial TLS-in-TLS fingerprint elimination phase (§3).
+// ShapingWindow 表示一个塑形流量窗口。
+// 在初始 TLS-in-TLS 指纹消除阶段使用（§3）。
 type ShapingWindow struct {
-	// NumRecords is the number of records to shape (default ~10).
+	// NumRecords 是塑形的记录数（默认 ~10）。
 	NumRecords int
 
-	// Model is the traffic profile to follow.
+	// Model 是要遵循的流量配置文件。
 	Model *Model
 }
 
-// DefaultShapingWindow returns a default shaping window for fingerprint elimination.
+// DefaultShapingWindow 返回用于指纹消除的默认塑形窗口。
 func DefaultShapingWindow(model *Model) *ShapingWindow {
 	return &ShapingWindow{
 		NumRecords: 10,
@@ -579,7 +578,7 @@ func DefaultShapingWindow(model *Model) *ShapingWindow {
 	}
 }
 
-// NextRecordSize returns the target size for the next record in the shaping window.
+// NextRecordSize 返回塑形窗口中下一个记录的目标大小。
 func (sw *ShapingWindow) NextRecordSize() uint16 {
 	return sw.Model.RecordSize()
 }

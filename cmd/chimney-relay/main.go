@@ -1,19 +1,19 @@
-// cmd/chimney-relay is the Chimney relay server.
+// cmd/chimney-relay 是 Chimney 中继服务器。
 //
-// The relay is the central component of the Chimney protocol. It sits between
-// the client and the real internet, forwarding TLS handshakes to real sites
-// and taking over connections after successful authentication.
+// 中继是 Chimney 协议的核心组件。它位于
+// 客户端和真实互联网之间，将 TLS 握手转发到真实站点
+// 并在成功认证后接管连接。
 //
-// Usage:
+// 用法：
 //
 //	chimney-relay -config /path/to/config.yaml
 //
-// The config file specifies:
-//   - Listen address
-//   - PSK (pre-shared key)
-//   - Whitelist files (intent + enforce layers)
-//   - Cloud region for CIDR validation
-//   - TLS-in-TLS shaping parameters
+// 配置文件指定：
+//   - 监听地址
+//   - PSK（预共享密钥）
+//   - 白名单文件（intent + enforce 层）
+//   - 云区域（用于 CIDR 验证）
+//   - TLS-in-TLS 整形参数
 package main
 
 import (
@@ -39,20 +39,20 @@ func main() {
 	flag.StringVar(&configPath, "config", "config/relay.yaml", "Path to relay configuration file")
 	flag.Parse()
 
-	// Setup structured logging
+	// 设置结构化日志
 	logLevel := &slog.LevelVar{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: logLevel,
 	}))
 
-	// Load configuration from YAML
+	// 从 YAML 加载配置
 	cfg, err := config.LoadRelayConfig(configPath)
 	if err != nil {
 		logger.Warn("failed to load configuration, using defaults", "error", err)
 		cfg = config.DefaultRelayConfig()
 	}
 
-	// Set log level from config
+	// 从配置中设置日志级别
 	switch cfg.LogLevel {
 	case "debug":
 		logLevel.Set(slog.LevelDebug)
@@ -64,7 +64,7 @@ func main() {
 		logLevel.Set(slog.LevelInfo)
 	}
 
-	// Convert to relay config
+	// 转换为中继配置
 	relayConfig := &relay.Config{
 		ListenAddr:         cfg.ListenAddr,
 		PSK:                cfg.PSK,
@@ -84,7 +84,7 @@ func main() {
 		ConnectDenyPrivate: cfg.ConnectDenyPrivate,
 	}
 
-	// Create and start relay server
+	// 创建并启动中继服务器
 	server, err := relay.NewServer(relayConfig, logger)
 	if err != nil {
 		logger.Error("failed to create relay server", "error", err)
@@ -101,7 +101,7 @@ func main() {
 		"cloud_region", cfg.CloudRegion,
 	)
 
-	// Start admin API if metrics address is configured
+	// 如果配置了 metrics 地址，启动管理 API
 	if cfg.MetricsAddr != "" {
 		adminToken := cfg.MetricsToken
 		if adminToken == "" {
@@ -110,11 +110,11 @@ func main() {
 		go startAdminAPI(cfg.MetricsAddr, adminToken, server, logger)
 	}
 
-	// Wait for interrupt signal
+	// 等待中断信号
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Print stats periodically
+	// 定期打印统计信息
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -143,7 +143,7 @@ func main() {
 	}
 }
 
-// startAdminAPI starts a minimal HTTP server for metrics and admin actions.
+// startAdminAPI 启动一个用于指标和管理操作的极简 HTTP 服务器。
 func startAdminAPI(addr, adminToken string, server *relay.Server, logger *slog.Logger) {
 	mux := http.NewServeMux()
 	requireAdmin := func(next http.HandlerFunc) http.HandlerFunc {
@@ -192,7 +192,7 @@ func startAdminAPI(addr, adminToken string, server *relay.Server, logger *slog.L
 		fmt.Fprintf(w, "OK")
 	})
 
-	// ── Dynamic User Management ──────────────────────────────
+	// ── 动态用户管理 ──────────────────────────────
 	mux.HandleFunc("/admin/users", requireAdmin(func(w http.ResponseWriter, r *http.Request) {
 		us := server.UserStore()
 		w.Header().Set("Content-Type", "application/json")

@@ -1,11 +1,11 @@
-// cmd/h2probe — live H2 SETTINGS probe
+// cmd/h2probe — 实时 H2 SETTINGS 探测工具
 //
-// Connects to real HTTPS servers, completes TLS+H2 handshake, captures the
-// server's SETTINGS (and connection-level WINDOW_UPDATE) frame in real time.
-// Outputs a settings_snapshot block ready to paste into intent.yaml, and can
-// update the file in-place with the -update flag.
+// 连接到真实 HTTPS 服务器，完成 TLS+H2 握手，实时捕获
+// 服务器的 SETTINGS（以及连接级 WINDOW_UPDATE）帧。
+// 输出可直接粘贴到 intent.yaml 的 settings_snapshot 块，并可通过
+// -update 标志原地更新文件。
 //
-// Usage:
+// 用法：
 //
 //	h2probe -sni cloudflare.com,www.google.com
 //	h2probe -file sites.txt -update config/intent.yaml
@@ -34,14 +34,14 @@ const (
 	frameHdr = 9
 )
 
-// H2 frame type constants.
+// H2 帧类型常量。
 const (
 	typeSettings     = 0x4
 	typeWindowUpdate = 0x8
 	flagAck          = 0x1
 )
 
-// H2 SETTINGS identifier constants.
+// H2 SETTINGS 标识符常量。
 const (
 	idHeaderTableSize      = 0x1
 	idEnablePush           = 0x2
@@ -60,7 +60,7 @@ var settingName = map[uint16]string{
 	idMaxHeaderListSize:    "MAX_HEADER_LIST_SIZE",
 }
 
-// ProbeResult holds the raw probe outcome for one SNI.
+// ProbeResult 保存一个 SNI 的原始探测结果。
 type ProbeResult struct {
 	SNI              string
 	Settings         map[string]uint32 // SETTINGS key → value
@@ -108,7 +108,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Deduplicate
+	// 去重
 	seen := make(map[string]bool, len(snis))
 	var unique []string
 	for _, s := range snis {
@@ -119,7 +119,7 @@ func main() {
 	}
 	snis = unique
 
-	// Run probes with bounded concurrency
+	// 使用有界并发运行探测
 	results := make([]*ProbeResult, len(snis))
 	sem := make(chan struct{}, *concFlag)
 	var wg sync.WaitGroup
@@ -135,7 +135,7 @@ func main() {
 	}
 	wg.Wait()
 
-	// Print results
+	// 打印结果
 	fmt.Println()
 	fmt.Println("=== Results ===")
 	fmt.Println()
@@ -152,7 +152,7 @@ func main() {
 
 	fmt.Printf("\n%d/%d probes succeeded.\n", successCount, len(results))
 
-	// Update intent.yaml if requested
+	// 如果请求，更新 intent.yaml
 	if *updateFlag != "" {
 		if err := updateIntentYAML(*updateFlag, results); err != nil {
 			fmt.Fprintf(os.Stderr, "\nupdating %s: %v\n", *updateFlag, err)
@@ -162,7 +162,7 @@ func main() {
 	}
 }
 
-// probe connects to host:port, completes H2 handshake, and captures SETTINGS.
+// probe 连接到 host:port，完成 H2 握手，并捕获 SETTINGS。
 func probe(sni string, port int, timeout time.Duration) *ProbeResult {
 	r := &ProbeResult{SNI: sni, CapturedAt: time.Now()}
 
@@ -190,15 +190,15 @@ func probe(sni string, port int, timeout time.Duration) *ProbeResult {
 		return r
 	}
 
-	// Send H2 client preface (magic + empty SETTINGS frame)
-	clientSettings := encodeSettings(nil, false) // empty SETTINGS
+	// 发送 H2 客户端前言（魔数 + 空 SETTINGS 帧）
+	clientSettings := encodeSettings(nil, false) // 空 SETTINGS
 	preface := append([]byte(h2Magic), clientSettings...)
 	if _, err := tlsConn.Write(preface); err != nil {
 		r.Err = fmt.Errorf("send preface: %w", err)
 		return r
 	}
 
-	// Read frames until we have the server SETTINGS (and optional WINDOW_UPDATE)
+	// 读取帧，直到获得服务器 SETTINGS（以及可选的 WINDOW_UPDATE）
 	br := bufio.NewReaderSize(tlsConn, 64*1024)
 	gotSettings := false
 	for {
@@ -214,7 +214,7 @@ func probe(sni string, port int, timeout time.Duration) *ProbeResult {
 		switch fh.Type {
 		case typeSettings:
 			if fh.Flags&flagAck != 0 {
-				continue // skip ACK frames
+				continue // 跳过 ACK 帧
 			}
 			settings, err := decodeSettings(payload)
 			if err != nil {
@@ -224,7 +224,7 @@ func probe(sni string, port int, timeout time.Duration) *ProbeResult {
 			r.Settings = settings
 			gotSettings = true
 
-			// Send SETTINGS ACK
+			// 发送 SETTINGS ACK
 			ack := encodeSettings(nil, true)
 			tlsConn.Write(ack)
 
@@ -234,14 +234,14 @@ func probe(sni string, port int, timeout time.Duration) *ProbeResult {
 			}
 
 		default:
-			// Ignore other frames; HEADERS, GOAWAY, etc.
+			// 忽略其他帧；HEADERS、GOAWAY 等。
 		}
 
-		// Stop after receiving SETTINGS + 1 extra frame window, or after ACK sent
+		// 在收到 SETTINGS + 1 个额外帧窗口后停止，或发送 ACK 后停止
 		if gotSettings && r.ConnectionWindow != 0 {
 			break
 		}
-		// Also stop if we've been reading too long (server may not send WINDOW_UPDATE)
+		// 如果读取时间过长也停止（服务器可能不发送 WINDOW_UPDATE）
 		if gotSettings {
 			rawConn.SetDeadline(time.Now().Add(500 * time.Millisecond))
 		}
@@ -253,7 +253,7 @@ func probe(sni string, port int, timeout time.Duration) *ProbeResult {
 	return r
 }
 
-// frameHeader is a parsed H2 frame header.
+// frameHeader 是解析后的 H2 帧头。
 type frameHeader struct {
 	Length   uint32
 	Type     uint8
@@ -317,7 +317,7 @@ func encodeSettings(params map[string]uint32, ack bool) []byte {
 	if ack {
 		frame[4] = flagAck
 	}
-	// stream ID = 0
+	// 流 ID = 0
 	copy(frame[frameHdr:], payload)
 	return frame
 }
@@ -347,14 +347,14 @@ func printSetting(m map[string]uint32, key string, defaultVal uint32) {
 	}
 }
 
-// IntentFile is the on-disk structure of intent.yaml.
+// IntentFile 是 intent.yaml 的磁盘结构。
 type IntentFile struct {
 	Version   int                     `yaml:"version"`
 	UpdatedAt string                  `yaml:"updated_at,omitempty"`
 	Entries   map[string]*IntentEntry `yaml:"entries"`
 }
 
-// IntentEntry mirrors whitelist.IntentEntry for YAML round-trip.
+// IntentEntry 用于 YAML 往返的 whitelist.IntentEntry 镜像。
 type IntentEntry struct {
 	SNI              string                 `yaml:"sni"`
 	Description      string                 `yaml:"description,omitempty"`
@@ -365,7 +365,7 @@ type IntentEntry struct {
 func updateIntentYAML(path string, results []*ProbeResult) error {
 	var file IntentFile
 
-	// Load existing file if present
+	// 加载现有文件（如果存在）
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read %s: %w", path, err)
@@ -391,14 +391,14 @@ func updateIntentYAML(path string, results []*ProbeResult) error {
 			entry = &IntentEntry{SNI: r.SNI}
 			file.Entries[r.SNI] = entry
 		}
-		entry.SNI = r.SNI // always correct the sni field to match the map key
+		entry.SNI = r.SNI // 始终修正 sni 字段以匹配映射键
 		entry.Description = fmt.Sprintf("Live-captured %s", r.CapturedAt.UTC().Format("2006-01-02"))
 
 		snap := make(map[string]interface{}, len(r.Settings))
 		for k, v := range r.Settings {
 			snap[k] = v
 		}
-		// Fill defaults for any settings not sent by server
+		// 填写服务器未发送的设置项的默认值
 		defaults := map[string]uint32{
 			"HEADER_TABLE_SIZE":      4096,
 			"ENABLE_PUSH":            0,
