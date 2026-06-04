@@ -1,7 +1,7 @@
 # Chimney — Behaviorally Indistinguishable Session-Parasitic Transport
 # Makefile for building, testing, and deployment.
 
-.PHONY: all build build-all test test-race test-coverage integration-local integration-reconnect soak-local soak-remote-download check clean install fmt fmt-check vet staticcheck lint
+.PHONY: all build build-all build-udp-stress test test-race test-coverage integration-local integration-reconnect soak-local soak-remote-download check clean install fmt fmt-check vet staticcheck lint
 
 # Go parameters
 GOCMD=go
@@ -16,6 +16,7 @@ STATICCHECK=staticcheck
 # Binary names
 RELAY_BINARY=chimney-relay
 CLIENT_BINARY=chimney-client
+UDP_STRESS_BINARY=udp_stress
 
 # Build directories
 BUILD_DIR=./build
@@ -52,18 +53,28 @@ build-client:
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -o $(BIN_DIR)/$(CLIENT_BINARY) ./cmd/chimney-client
 
+# Build UDP packet stress utility.
+build-udp-stress:
+	@echo "Building UDP stress utility..."
+	@mkdir -p $(BIN_DIR)
+	$(GOBUILD) -o $(BIN_DIR)/$(UDP_STRESS_BINARY) ./cmd/udp_stress
+
 # Build release-like binaries for common platforms.
 build-all:
 	@echo "Building cross-platform binaries..."
 	@mkdir -p $(BIN_DIR)
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(RELAY_BINARY)-linux-amd64 ./cmd/chimney-relay
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(CLIENT_BINARY)-linux-amd64 ./cmd/chimney-client
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(UDP_STRESS_BINARY)-linux-amd64 ./cmd/udp_stress
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(RELAY_BINARY)-windows-amd64.exe ./cmd/chimney-relay
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(CLIENT_BINARY)-windows-amd64.exe ./cmd/chimney-client
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(UDP_STRESS_BINARY)-windows-amd64.exe ./cmd/udp_stress
 	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(RELAY_BINARY)-darwin-amd64 ./cmd/chimney-relay
 	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(CLIENT_BINARY)-darwin-amd64 ./cmd/chimney-client
+	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(UDP_STRESS_BINARY)-darwin-amd64 ./cmd/udp_stress
 	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(RELAY_BINARY)-darwin-arm64 ./cmd/chimney-relay
 	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(CLIENT_BINARY)-darwin-arm64 ./cmd/chimney-client
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(UDP_STRESS_BINARY)-darwin-arm64 ./cmd/udp_stress
 
 # Run all tests
 test:
@@ -222,6 +233,7 @@ help:
 	@echo "  build-all        - Build common release binaries"
 	@echo "  build-relay      - Build relay server only"
 	@echo "  build-client     - Build client only"
+	@echo "  build-udp-stress - Build UDP PacketConn stress utility"
 	@echo "  test             - Run all tests without race detector"
 	@echo "  test-race        - Run race tests (requires cgo/C compiler)"
 	@echo "  integration-local - Run local relay/client binary integration test"

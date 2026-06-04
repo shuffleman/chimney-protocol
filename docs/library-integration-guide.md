@@ -168,7 +168,7 @@ pc, err := dialer.ListenPacket(ctx)
 当前边界：
 
 - `ListenPacket` 是 `net.PacketConn` 形态。
-- 一个 `Dialer` 当前只允许一个 UDP PacketConn。
+- 同一个 `Dialer` 可以并发创建多个 UDP `PacketConn`，每个 `PacketConn` 对应一个独立 H2 stream。
 - CLI SOCKS5 尚未实现 UDP ASSOCIATE。
 - sing-box/Xray 接 UDP 时应在 adapter 层评估目标框架需要的是 packet API、session API 还是 per-destination UDP conn。
 

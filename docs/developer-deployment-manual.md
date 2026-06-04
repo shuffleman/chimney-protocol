@@ -121,6 +121,7 @@ Linux 测试服务器
 | 命令 | 用途 |
 | --- | --- |
 | `cmd/socks_stress` | 通过 SOCKS5 进行多连接字节校验压测 |
+| `cmd/udp_stress` | 直接调用根包 `ListenPacket` 压测 UDP/FQDN 数据报路径 |
 | `cmd/h2probe` | 探测真实站点 HTTP/2 SETTINGS |
 | `cmd/calibrate` | 从 pcap/keylog 生成或校准 profile |
 | `cmd/speedtest` | 项目内速度测试辅助工具 |
@@ -1049,6 +1050,28 @@ SOCKS 压测：
 .\build\bin\socks_stress.exe -socks 127.0.0.1:1080 -dl 12 -ul 12 -bytes 8388608 -timeout 180s -json
 ```
 
+UDP/FQDN 压测：
+
+```powershell
+go build -o .\build\bin\udp_stress.exe .\cmd\udp_stress
+.\build\bin\udp_stress.exe `
+  -relay 103.135.147.226:8444 `
+  -sni cloudflare.com `
+  -psk 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef `
+  -target one.one.one.one:53 `
+  -query cloudflare.com `
+  -workers 4 `
+  -count 20 `
+  -timeout 10s `
+  -json
+```
+
+说明：
+
+- `udp_stress` 不经过 `cmd/chimney-client` 的 SOCKS5 入口，而是直接作为三方库使用方调用根包 `Dialer.ListenPacket`。
+- `-target` 可以填 IP，例如 `1.1.1.1:53`；也可以填域名，例如 `one.one.one.one:53`，用于覆盖 UDP FQDN 编码和 relay 侧域名解析。
+- 每个 worker 独立创建一个 `PacketConn`，更接近 sing-box/Xray adapter 并发打开 UDP 会话的使用方式。
+
 远端公网验收：
 
 ```powershell
@@ -1404,6 +1427,7 @@ pc, err := d.ListenPacket(context.Background())
 注意：
 
 - `ListenPacket` 是根包 API，CLI SOCKS5 尚未实现 UDP ASSOCIATE。
+- 同一个 `Dialer` 可以并发创建多个 `PacketConn`；每个 `PacketConn` 使用独立 H2 stream。
 - `DialContext` 的 `network` 当前基本按 TCP 使用，目标必须是 `host:port`。
 - `Dialer.Close()` 会关闭 pool 中所有 tunnel。
 
