@@ -1,6 +1,7 @@
 package chimney
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -353,6 +354,25 @@ func TestUDPConnCloseWakesBlockedReadFrom(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("blocked ReadFrom was not woken by Close")
+	}
+}
+
+func TestEncodeDatagramSupportsUDPAddrAndDomainAddr(t *testing.T) {
+	ipv4 := encodeDatagram(&net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 53}, []byte("q"))
+	if want := []byte{0x01, 192, 0, 2, 1, 0, 53, 'q'}; !bytes.Equal(ipv4, want) {
+		t.Fatalf("unexpected IPv4 datagram: %v", ipv4)
+	}
+
+	ipv6 := encodeDatagram(&net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 853}, []byte("q"))
+	if len(ipv6) != 20 || ipv6[0] != 0x04 || ipv6[17] != 3 || ipv6[18] != 85 || ipv6[19] != 'q' {
+		t.Fatalf("unexpected IPv6 datagram: %v", ipv6)
+	}
+
+	domain := encodeDatagram(addr{"udp", "cloudflare-dns.com:443"}, []byte("q"))
+	want := append([]byte{0x03, byte(len("cloudflare-dns.com"))}, []byte("cloudflare-dns.com")...)
+	want = append(want, 1, 187, 'q')
+	if !bytes.Equal(domain, want) {
+		t.Fatalf("unexpected domain datagram: %v", domain)
 	}
 }
 

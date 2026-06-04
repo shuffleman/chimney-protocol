@@ -32,6 +32,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -752,31 +753,65 @@ func parseDatagram(payload []byte, b []byte) (int, net.Addr, error) {
 // encodeDatagram builds the wire format for a UDP datagram (without command byte;
 // streamConn.Write prepends the correct cmd based on the stream type).
 func encodeDatagram(addr net.Addr, b []byte) []byte {
-	udpAddr, ok := addr.(*net.UDPAddr)
+	host, port, ok := udpAddrParts(addr)
 	if !ok {
 		return nil
 	}
-	ip := udpAddr.IP.To4()
-	if ip != nil {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		if len(host) == 0 || len(host) > 255 {
+			return nil
+		}
+		buf := make([]byte, 1+1+len(host)+2+len(b))
+		buf[0] = 0x03
+		buf[1] = byte(len(host))
+		copy(buf[2:2+len(host)], host)
+		portOffset := 2 + len(host)
+		buf[portOffset] = byte(port >> 8)
+		buf[portOffset+1] = byte(port)
+		copy(buf[portOffset+2:], b)
+		return buf
+	}
+
+	ip4 := ip.To4()
+	if ip4 != nil {
 		buf := make([]byte, 1+4+2+len(b))
 		buf[0] = 0x01
-		copy(buf[1:5], ip)
-		buf[5] = byte(udpAddr.Port >> 8)
-		buf[6] = byte(udpAddr.Port)
+		copy(buf[1:5], ip4)
+		buf[5] = byte(port >> 8)
+		buf[6] = byte(port)
 		copy(buf[7:], b)
 		return buf
 	}
-	ip6 := udpAddr.IP.To16()
+	ip6 := ip.To16()
 	if ip6 != nil {
 		buf := make([]byte, 1+16+2+len(b))
 		buf[0] = 0x04
 		copy(buf[1:17], ip6)
-		buf[17] = byte(udpAddr.Port >> 8)
-		buf[18] = byte(udpAddr.Port)
+		buf[17] = byte(port >> 8)
+		buf[18] = byte(port)
 		copy(buf[19:], b)
 		return buf
 	}
 	return nil
+}
+
+func udpAddrParts(addr net.Addr) (host string, port int, ok bool) {
+	if udpAddr, isUDP := addr.(*net.UDPAddr); isUDP {
+		if udpAddr.IP == nil {
+			return "", 0, false
+		}
+		return udpAddr.IP.String(), udpAddr.Port, true
+	}
+	host, portString, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return "", 0, false
+	}
+	port64, err := strconv.ParseUint(portString, 10, 16)
+	if err != nil {
+		return "", 0, false
+	}
+	return host, int(port64), true
 }
 
 // WriteTo sends a UDP datagram to the given address.
