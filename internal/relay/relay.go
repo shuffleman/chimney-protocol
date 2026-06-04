@@ -1357,7 +1357,7 @@ func encodeUDPResponse(addr *net.UDPAddr, payload []byte) []byte {
 }
 
 // parseUDPAddr 从 UDP DATA 帧负载中提取目标地址
-//（0x04 命令字节之后的字节）。
+// （0x04 命令字节之后的字节）。
 func parseUDPAddr(cmdData []byte) (*net.UDPAddr, []byte, error) {
 	if len(cmdData) < 3 {
 		return nil, nil, fmt.Errorf("relay: truncated UDP frame")
@@ -1378,6 +1378,9 @@ func parseUDPAddr(cmdData []byte) (*net.UDPAddr, []byte, error) {
 			return nil, nil, fmt.Errorf("relay: truncated domain UDP frame")
 		}
 		nameLen := int(cmdData[1])
+		if nameLen == 0 {
+			return nil, nil, fmt.Errorf("relay: empty UDP domain")
+		}
 		addrEnd := 2 + nameLen
 		if len(cmdData) < addrEnd+2 {
 			return nil, nil, fmt.Errorf("relay: truncated domain UDP frame")
@@ -1385,7 +1388,11 @@ func parseUDPAddr(cmdData []byte) (*net.UDPAddr, []byte, error) {
 		port := int(cmdData[addrEnd])<<8 | int(cmdData[addrEnd+1])
 		host = string(cmdData[2 : 2+nameLen])
 		rest = cmdData[addrEnd+2:]
-		return &net.UDPAddr{IP: net.ParseIP(host), Port: port}, rest, nil
+		addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, fmt.Sprint(port)))
+		if err != nil {
+			return nil, nil, fmt.Errorf("relay: resolve UDP domain %q: %w", host, err)
+		}
+		return addr, rest, nil
 	case 0x04: // IPv6
 		if len(cmdData) < 19 {
 			return nil, nil, fmt.Errorf("relay: truncated IPv6 UDP frame")
@@ -1767,7 +1774,7 @@ func extractSNI(handshakeMsg []byte) string {
 
 // findChimneyRecord 扫描拼接的 TLS 记录缓冲区，寻找有效的
 // ChimneyRecord。它遍历每个 TLS 记录，对于每个 0x17
-//（application_data）记录，创建一个新的编解码器并尝试解密。
+// （application_data）记录，创建一个新的编解码器并尝试解密。
 // 第一个成功解密的记录作为 chimneyRecord 返回。
 // 它之前的所有记录（包括非 Chimney 的 0x17 记录，如 uTLS
 // 握手后的记录）作为 preludeRecords 返回，用于转发到真实站点。

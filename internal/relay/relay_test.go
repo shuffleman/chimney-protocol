@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -140,5 +141,65 @@ func TestCloseStreamReleasesPoolResources(t *testing.T) {
 		}
 	default:
 		t.Fatal("write channel was not closed")
+	}
+}
+
+func TestParseUDPAddrSupportsIPAndDomainTargets(t *testing.T) {
+	tests := []struct {
+		name     string
+		frame    []byte
+		wantPort int
+		wantData []byte
+	}{
+		{
+			name:     "IPv4",
+			frame:    []byte{0x01, 192, 0, 2, 1, 0, 53, 'q'},
+			wantPort: 53,
+			wantData: []byte{'q'},
+		},
+		{
+			name:     "IPv6",
+			frame:    append(append([]byte{0x04}, net.ParseIP("2001:db8::1").To16()...), 3, 85, 'q'),
+			wantPort: 853,
+			wantData: []byte{'q'},
+		},
+		{
+			name:     "Domain",
+			frame:    append(append([]byte{0x03, byte(len("localhost"))}, []byte("localhost")...), 0, 53, 'q'),
+			wantPort: 53,
+			wantData: []byte{'q'},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, data, err := parseUDPAddr(tt.frame)
+			if err != nil {
+				t.Fatalf("parseUDPAddr failed: %v", err)
+			}
+			if addr.Port != tt.wantPort {
+				t.Fatalf("port = %d, want %d", addr.Port, tt.wantPort)
+			}
+			if addr.IP == nil {
+				t.Fatal("resolved UDP address has nil IP")
+			}
+			if !reflect.DeepEqual(data, tt.wantData) {
+				t.Fatalf("payload = %v, want %v", data, tt.wantData)
+			}
+		})
+	}
+}
+
+func TestParseUDPAddrRejectsTruncatedDomainTarget(t *testing.T) {
+	_, _, err := parseUDPAddr([]byte{0x03, 10, 'l', 'o'})
+	if err == nil {
+		t.Fatal("expected truncated domain UDP frame error")
+	}
+}
+
+func TestParseUDPAddrRejectsEmptyDomainTarget(t *testing.T) {
+	_, _, err := parseUDPAddr([]byte{0x03, 0, 0, 53, 'q'})
+	if err == nil {
+		t.Fatal("expected empty domain UDP frame error")
 	}
 }
