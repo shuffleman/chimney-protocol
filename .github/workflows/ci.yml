@@ -50,6 +50,11 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Verify release tooling
+        run: |
+          mkdir -p build/release-tooling
+          go run ./scripts/generate-spdx-sbom.go -version v0.0.0-ci -output build/release-tooling/chimney-v0.0.0-ci.spdx.json
+
       - name: Race test
         run: go test -race ./...
 

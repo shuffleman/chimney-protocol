@@ -153,14 +153,14 @@
 
 - systemd unit 模板。
 - Docker image 版本 tag。
-- release workflow：构建多平台二进制、checksums、SBOM、release notes。基础完成：relay/client/udp_stress 二进制、checksums、SPDX SBOM、GitHub Release 和按 tag 区间生成的 release notes；签名和 CHANGELOG 仍需增强。
+- release workflow：构建多平台二进制、checksums、SBOM、release notes。基础完成：relay/client/udp_stress 二进制、checksums、SPDX SBOM、artifact 自检、GitHub Release 和按 tag 区间生成的 release notes；签名和 CHANGELOG 仍需增强。
 - CHANGELOG。
 - 运行手册：部署、升级、回滚、故障排查。
 
 验收标准：
 
 - tag push 后自动产出 release artifact。
-- artifact 可校验。
+- artifact 可校验，release workflow 会在上传前检查 expected artifact、非空文件和 SHA256SUMS 覆盖。
 - 生产部署文档能从空机器走通。
 
 ## 4. 任务优先级
