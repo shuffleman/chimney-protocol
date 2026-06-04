@@ -7,11 +7,13 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -25,6 +27,7 @@ var (
 	workerBytes     = flag.Int64("bytes", 8*1024*1024, "bytes per worker")
 	timeout         = flag.Duration("timeout", 90*time.Second, "overall timeout")
 	bufferSize      = flag.Int("buf", 128*1024, "I/O buffer size")
+	jsonOutput      = flag.Bool("json", false, "emit a machine-readable JSON result")
 )
 
 type stats struct {
@@ -96,20 +99,54 @@ func main() {
 	elapsed := time.Since(start)
 	totalBytes := s.dlBytes.Load() + s.ulBytes.Load()
 	mbps := float64(totalBytes) * 8 / elapsed.Seconds() / 1e6
-	fmt.Printf("Backend: %s\n", backendAddr)
-	fmt.Printf("SOCKS5:  %s\n", *socksAddr)
-	fmt.Printf("Workers: dl=%d ul=%d bytes_per_worker=%d\n", *downloadWorkers, *uploadWorkers, *workerBytes)
-	fmt.Printf("Result:  dl=%.1f MiB ul=%.1f MiB errors=%d elapsed=%s avg=%.1f Mbps\n",
-		float64(s.dlBytes.Load())/1024/1024,
-		float64(s.ulBytes.Load())/1024/1024,
-		s.errors.Load(),
-		elapsed.Round(time.Millisecond),
-		mbps,
-	)
+	result := stressResult{
+		BackendAddr:     backendAddr,
+		SocksAddr:       *socksAddr,
+		DownloadWorkers: *downloadWorkers,
+		UploadWorkers:   *uploadWorkers,
+		BytesPerWorker:  *workerBytes,
+		DownloadBytes:   s.dlBytes.Load(),
+		UploadBytes:     s.ulBytes.Load(),
+		Errors:          s.errors.Load(),
+		ElapsedMillis:   elapsed.Milliseconds(),
+		AverageMbps:     mbps,
+	}
+
+	if *jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(result); err != nil {
+			log.Fatalf("encode result: %v", err)
+		}
+	} else {
+		fmt.Printf("Backend: %s\n", backendAddr)
+		fmt.Printf("SOCKS5:  %s\n", *socksAddr)
+		fmt.Printf("Workers: dl=%d ul=%d bytes_per_worker=%d\n", *downloadWorkers, *uploadWorkers, *workerBytes)
+		fmt.Printf("Result:  dl=%.1f MiB ul=%.1f MiB errors=%d elapsed=%s avg=%.1f Mbps\n",
+			float64(result.DownloadBytes)/1024/1024,
+			float64(result.UploadBytes)/1024/1024,
+			result.Errors,
+			elapsed.Round(time.Millisecond),
+			result.AverageMbps,
+		)
+	}
 
 	if s.errors.Load() != 0 {
 		log.Fatalf("stress failed with %d errors", s.errors.Load())
 	}
+}
+
+type stressResult struct {
+	BackendAddr     string  `json:"backend_addr"`
+	SocksAddr       string  `json:"socks_addr"`
+	DownloadWorkers int     `json:"download_workers"`
+	UploadWorkers   int     `json:"upload_workers"`
+	BytesPerWorker  int64   `json:"bytes_per_worker"`
+	DownloadBytes   int64   `json:"download_bytes"`
+	UploadBytes     int64   `json:"upload_bytes"`
+	Errors          int64   `json:"errors"`
+	ElapsedMillis   int64   `json:"elapsed_millis"`
+	AverageMbps     float64 `json:"average_mbps"`
 }
 
 func startBackend() (addr string, stop func(), err error) {

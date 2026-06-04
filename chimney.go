@@ -30,6 +30,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,6 +45,7 @@ import (
 	"github.com/shuffleman/chimney-protocol/internal/relay"
 
 	utls "github.com/refraction-networking/utls"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -55,60 +57,149 @@ const (
 
 	// DefaultPoolSize is the default number of parallel H2 connections.
 	DefaultPoolSize = 4
+
+	// DefaultTCPBufferSize is the default TCP read/write buffer size per tunnel.
+	DefaultTCPBufferSize = 256 * 1024
 )
 
 // Config holds all parameters for establishing a Chimney tunnel.
-// Only RelayAddr, SNI, and PSK are required; all other fields have defaults.
+// RelayAddr, SNI, and either PSK or UserID are required; all other fields have
+// defaults. Config is safe to embed in downstream project configuration structs.
 type Config struct {
 	// RelayAddr is the relay server address (host:port). Required.
-	RelayAddr string
+	RelayAddr string `yaml:"relay_addr" json:"relay_addr"`
 
 	// SNI is the TLS Server Name Indication — must be a whitelisted site. Required.
-	SNI string
+	SNI string `yaml:"sni" json:"sni"`
 
-	// PSK is the pre-shared key (64 hex chars = 256 bits). Required.
-	PSK string
+	// PSK is the pre-shared key (64 hex chars = 256 bits). Optional when UserID
+	// is set; in that mode PSK is derived as SHA256(UserID).
+	PSK string `yaml:"psk,omitempty" json:"psk,omitempty"`
 
 	// UserID is the user identifier (e.g. UUID) for multi-user relay deployments.
 	// It is hashed to a 4-byte key hint sent alongside the auth tag.
 	// If empty, defaults to "default" (single-user mode).
-	UserID string
+	UserID string `yaml:"user_id,omitempty" json:"user_id,omitempty"`
 
 	// TagLen is the auth tag length in bytes (default: 16).
-	TagLen int
+	TagLen int `yaml:"tag_len,omitempty" json:"tag_len,omitempty"`
 
 	// Fingerprint is the uTLS ClientHello fingerprint name (default: "chrome").
 	// Available: chrome, firefox, safari, ios, edge, android, 360, qq,
 	// randomized, golang — with optional -version (e.g. "chrome-120").
-	Fingerprint string
+	Fingerprint string `yaml:"fingerprint,omitempty" json:"fingerprint,omitempty"`
 
 	// ProfilePath is an optional traffic profile JSON for padding.
 	// Empty string disables padding.
-	ProfilePath string
+	ProfilePath string `yaml:"profile_path,omitempty" json:"profile_path,omitempty"`
 
 	// PaddingTarget overrides the padding record size. 0 = use profile distribution.
-	PaddingTarget int
+	PaddingTarget int `yaml:"padding_target,omitempty" json:"padding_target,omitempty"`
 
 	// DilutionPath is an optional content blocks JSON for the dilution stream.
 	// Empty string disables dilution.
-	DilutionPath string
+	DilutionPath string `yaml:"dilution_path,omitempty" json:"dilution_path,omitempty"`
 
 	// ConnectTimeout is the TCP connect timeout (default: 10s).
-	ConnectTimeout time.Duration
+	ConnectTimeout time.Duration `yaml:"connect_timeout,omitempty" json:"connect_timeout,omitempty"`
 
 	// HandshakeTimeout is the TLS + H2 handshake timeout (default: 10s).
-	HandshakeTimeout time.Duration
+	HandshakeTimeout time.Duration `yaml:"handshake_timeout,omitempty" json:"handshake_timeout,omitempty"`
 
 	// PoolSize is the number of parallel H2 connections to the relay (default: 4).
 	// Higher values increase throughput under high concurrency by parallelising
 	// frame dispatch across multiple TCP sockets. Set to 1 for single-connection
 	// mode (lowest resource usage, sufficient for low concurrency).
-	PoolSize int
+	PoolSize int `yaml:"pool_size,omitempty" json:"pool_size,omitempty"`
 
 	// TCPBufferSize sets the TCP read/write buffer size in bytes for each tunnel
 	// connection (default: 262144 = 256 KiB). On memory-constrained platforms
 	// like iOS, reduce to 65536 to save ~384 KiB per tunnel.
-	TCPBufferSize int
+	TCPBufferSize int `yaml:"tcp_buffer_size,omitempty" json:"tcp_buffer_size,omitempty"`
+}
+
+// DefaultConfig returns a Config populated with library defaults.
+func DefaultConfig() Config {
+	return Config{
+		TagLen:           auth.DefaultTagLen,
+		Fingerprint:      "chrome",
+		ConnectTimeout:   DefaultConnectTimeout,
+		HandshakeTimeout: DefaultHandshakeTimeout,
+		PoolSize:         DefaultPoolSize,
+		TCPBufferSize:    DefaultTCPBufferSize,
+	}
+}
+
+// ConfigFromYAML parses a Chimney client-library config from YAML, applies
+// defaults, and validates it. It is intended for downstream projects that want
+// to embed Chimney as a transport without importing internal packages.
+func ConfigFromYAML(data []byte) (Config, error) {
+	config := DefaultConfig()
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return Config{}, fmt.Errorf("chimney: parse config: %w", err)
+	}
+	if err := config.Normalize(); err != nil {
+		return Config{}, err
+	}
+	return config, nil
+}
+
+// LoadConfigFile loads a Chimney client-library config from a YAML file.
+func LoadConfigFile(path string) (Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("chimney: read config: %w", err)
+	}
+	return ConfigFromYAML(data)
+}
+
+// Normalize applies defaults, derives PSK from UserID when needed, and validates
+// the config. It is useful when downstream projects construct Config manually.
+func (c *Config) Normalize() error {
+	if c.TagLen == 0 {
+		c.TagLen = auth.DefaultTagLen
+	}
+	if c.Fingerprint == "" {
+		c.Fingerprint = "chrome"
+	}
+	if c.ConnectTimeout == 0 {
+		c.ConnectTimeout = DefaultConnectTimeout
+	}
+	if c.HandshakeTimeout == 0 {
+		c.HandshakeTimeout = DefaultHandshakeTimeout
+	}
+	if c.PoolSize <= 0 {
+		c.PoolSize = DefaultPoolSize
+	}
+	if c.TCPBufferSize <= 0 {
+		c.TCPBufferSize = DefaultTCPBufferSize
+	}
+
+	if c.RelayAddr == "" {
+		return fmt.Errorf("chimney: relay_addr is required")
+	}
+	if c.SNI == "" {
+		return fmt.Errorf("chimney: sni is required")
+	}
+	if c.PSK == "" {
+		if c.UserID == "" {
+			return fmt.Errorf("chimney: psk or user_id is required")
+		}
+		c.PSK = hex.EncodeToString(auth.DerivePSKFromID(c.UserID))
+	}
+	if _, err := hex.DecodeString(c.PSK); err != nil {
+		return fmt.Errorf("chimney: psk must be hex: %w", err)
+	}
+	if len(c.PSK) != 64 {
+		return fmt.Errorf("chimney: psk must be 64 hex characters")
+	}
+	if c.TagLen < 8 || c.TagLen > 32 {
+		return fmt.Errorf("chimney: tag_len must be between 8 and 32")
+	}
+	if _, err := parseFingerprint(c.Fingerprint); err != nil {
+		return fmt.Errorf("chimney: %w", err)
+	}
+	return nil
 }
 
 // tunnel is a single H2 connection to the relay. The Dialer maintains a pool
@@ -927,27 +1018,8 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 // NewDialer connects to a Chimney relay, establishes PoolSize TLS+H2 tunnels,
 // and returns a Dialer ready to open streams via DialContext.
 func NewDialer(config Config) (*Dialer, error) {
-	if config.TagLen == 0 {
-		config.TagLen = auth.DefaultTagLen
-	}
-	if config.Fingerprint == "" {
-		config.Fingerprint = "chrome"
-	}
-	if config.ConnectTimeout == 0 {
-		config.ConnectTimeout = DefaultConnectTimeout
-	}
-	if config.HandshakeTimeout == 0 {
-		config.HandshakeTimeout = DefaultHandshakeTimeout
-	}
-	if config.PoolSize <= 0 {
-		config.PoolSize = DefaultPoolSize
-	}
-
-	if config.PSK == "" {
-		if config.UserID == "" {
-			return nil, fmt.Errorf("chimney: PSK or UserID is required")
-		}
-		config.PSK = hex.EncodeToString(auth.DerivePSKFromID(config.UserID))
+	if err := config.Normalize(); err != nil {
+		return nil, err
 	}
 
 	var prof *profile.Model

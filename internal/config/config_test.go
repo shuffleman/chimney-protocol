@@ -62,6 +62,19 @@ func TestRelayConfig_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "valid CONNECT ACL config",
+			config: &RelayConfig{
+				ListenAddr:         ":443",
+				PSK:                "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678",
+				TagLen:             16,
+				CloudRegion:        "us-east-1",
+				ConnectAllowCIDRs:  []string{"203.0.113.0/24"},
+				ConnectDenyCIDRs:   []string{"203.0.113.10/32"},
+				ConnectDenyPrivate: true,
+			},
+			wantErr: false,
+		},
+		{
 			name: "missing listen addr",
 			config: &RelayConfig{
 				PSK:         "deadbeef",
@@ -105,6 +118,17 @@ func TestRelayConfig_Validate(t *testing.T) {
 				ListenAddr: ":443",
 				PSK:        "deadbeef",
 				TagLen:     16,
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid CONNECT allow CIDR",
+			config: &RelayConfig{
+				ListenAddr:        ":443",
+				PSK:               "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678",
+				TagLen:            16,
+				CloudRegion:       "us-east-1",
+				ConnectAllowCIDRs: []string{"not-a-cidr"},
 			},
 			wantErr: true,
 		},

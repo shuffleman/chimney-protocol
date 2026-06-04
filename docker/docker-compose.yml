@@ -1,5 +1,9 @@
-# Docker Compose for Chimney
-# Copy this file to docker-compose.yml and customize as needed.
+# Docker Compose for Chimney.
+#
+# Run from the repository root with:
+#   docker compose -f docker/docker-compose.yml up --build relay
+#
+# Copy config/relay.yaml.example to config/relay.yaml before running.
 
 version: '3.8'
 
@@ -14,10 +18,10 @@ services:
       - "443:443"
       - "8080:8080"  # Metrics/health endpoint
     volumes:
-      - ./config:/app/config:ro
-      - ./profiles:/app/profiles:ro
+      - ../config:/app/config:ro
+      - ../profiles:/app/profiles:ro
     environment:
-      - CHIMNEY_LOG_LEVEL=info
+      - CHIMNEY_ADMIN_TOKEN=${CHIMNEY_ADMIN_TOKEN:-}
     command: ["-config", "/app/config/relay.yaml"]
     networks:
       - chimney-net
@@ -37,14 +41,16 @@ services:
     ports:
       - "127.0.0.1:1080:1080"  # SOCKS5 proxy
     environment:
-      - CHIMNEY_RELAY=relay.example.com:443
-      - CHIMNEY_SNI=real-site.example.com
-      - CHIMNEY_PSK=${CHIMNEY_PSK}  # Set via .env file
+      - CHIMNEY_RELAY=${CHIMNEY_RELAY:-relay.example.com:443}
+      - CHIMNEY_SNI=${CHIMNEY_SNI:-real-site.example.com}
+      - CHIMNEY_DEST=${CHIMNEY_DEST:-127.0.0.1:1}
+      - CHIMNEY_USER_ID=${CHIMNEY_USER_ID:-your-uuid-here}
+      - CHIMNEY_PSK=${CHIMNEY_PSK:-}
     command: [
-      "-relay", "${CHIMNEY_RELAY}",
-      "-sni", "${CHIMNEY_SNI}",
-      "-dest", "${CHIMNEY_DEST}",
-      "-psk", "${CHIMNEY_PSK}",
+      "-relay", "${CHIMNEY_RELAY:-relay.example.com:443}",
+      "-sni", "${CHIMNEY_SNI:-real-site.example.com}",
+      "-dest", "${CHIMNEY_DEST:-127.0.0.1:1}",
+      "-user-id", "${CHIMNEY_USER_ID:-your-uuid-here}",
       "-listen", "0.0.0.0:1080"
     ]
     networks:

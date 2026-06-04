@@ -66,19 +66,22 @@ func main() {
 
 	// Convert to relay config
 	relayConfig := &relay.Config{
-		ListenAddr:       cfg.ListenAddr,
-		PSK:              cfg.PSK,
-		Users:            cfg.Users,
-		UserIDs:          cfg.UserIDs,
-		TagLen:           cfg.TagLen,
-		IntentFile:       cfg.IntentFile,
-		EnforceFile:      cfg.EnforceFile,
-		CloudRegion:      cfg.CloudRegion,
-		DefaultBackend:   cfg.DefaultBackend,
-		HandshakeTimeout: cfg.HandshakeTimeout,
-		AuthReadTimeout:  cfg.AuthReadTimeout,
-		EnableProfiling:  cfg.EnableProfiling,
-		ProfileDir:       cfg.ProfileDir,
+		ListenAddr:         cfg.ListenAddr,
+		PSK:                cfg.PSK,
+		Users:              cfg.Users,
+		UserIDs:            cfg.UserIDs,
+		TagLen:             cfg.TagLen,
+		IntentFile:         cfg.IntentFile,
+		EnforceFile:        cfg.EnforceFile,
+		CloudRegion:        cfg.CloudRegion,
+		DefaultBackend:     cfg.DefaultBackend,
+		HandshakeTimeout:   cfg.HandshakeTimeout,
+		AuthReadTimeout:    cfg.AuthReadTimeout,
+		EnableProfiling:    cfg.EnableProfiling,
+		ProfileDir:         cfg.ProfileDir,
+		ConnectAllowCIDRs:  cfg.ConnectAllowCIDRs,
+		ConnectDenyCIDRs:   cfg.ConnectDenyCIDRs,
+		ConnectDenyPrivate: cfg.ConnectDenyPrivate,
 	}
 
 	// Create and start relay server

@@ -104,6 +104,9 @@ type Server struct {
 
 	// connSem limits total open backend connections across all tunnels.
 	connSem chan struct{}
+
+	// connectACL restricts authenticated CONNECT destinations.
+	connectACL *connectACL
 }
 
 // Config holds the relay server configuration.
@@ -169,6 +172,18 @@ type Config struct {
 	// This allows integration with external routing frameworks.
 	// Signature matches net.Dialer.DialContext.
 	BackendDialer func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	// ConnectAllowCIDRs limits authenticated CONNECT targets to these CIDR
+	// ranges. Empty means no allow-list restriction.
+	ConnectAllowCIDRs []string
+
+	// ConnectDenyCIDRs rejects authenticated CONNECT targets in these CIDR
+	// ranges. Deny rules take precedence over allow rules.
+	ConnectDenyCIDRs []string
+
+	// ConnectDenyPrivate rejects private, loopback, link-local, multicast, and
+	// unspecified CONNECT targets after authentication.
+	ConnectDenyPrivate bool
 }
 
 // DefaultConfig returns a default configuration.
@@ -246,6 +261,11 @@ func NewServer(config *Config, logger *slog.Logger) (*Server, error) {
 		return nil, fmt.Errorf("relay: failed to create user store: %w", userErr)
 	}
 
+	connectACL, err := newConnectACL(config.ConnectAllowCIDRs, config.ConnectDenyCIDRs, config.ConnectDenyPrivate)
+	if err != nil {
+		return nil, fmt.Errorf("relay: invalid CONNECT ACL: %w", err)
+	}
+
 	return &Server{
 		config:       config,
 		whitelistMgr: whitelistMgr,
@@ -254,6 +274,7 @@ func NewServer(config *Config, logger *slog.Logger) (*Server, error) {
 		logger:       logger,
 		dialSem:      make(chan struct{}, MaxConcurrentBackendDials),
 		connSem:      make(chan struct{}, MaxBackendConnsGlobal),
+		connectACL:   connectACL,
 	}, nil
 }
 
@@ -908,6 +929,7 @@ type tunnelConnPool struct {
 	backendDialer func(ctx context.Context, network, addr string) (net.Conn, error)
 	dialSem       chan struct{} // limits concurrent backend dials (shared across tunnels)
 	connSem       chan struct{} // limits total open backend conns (shared across tunnels)
+	connectACL    *connectACL
 }
 
 type pendingStream struct {
@@ -916,7 +938,109 @@ type pendingStream struct {
 	bufs   [][]byte
 }
 
-func newTunnelConnPool(backendDialer func(ctx context.Context, network, addr string) (net.Conn, error), dialSem, connSem chan struct{}) *tunnelConnPool {
+type connectACL struct {
+	allowCIDRs  []*net.IPNet
+	denyCIDRs   []*net.IPNet
+	denyPrivate bool
+}
+
+func newConnectACL(allowCIDRs, denyCIDRs []string, denyPrivate bool) (*connectACL, error) {
+	if len(allowCIDRs) == 0 && len(denyCIDRs) == 0 && !denyPrivate {
+		return nil, nil
+	}
+
+	allow, err := parseConnectCIDRs("allow", allowCIDRs)
+	if err != nil {
+		return nil, err
+	}
+	deny, err := parseConnectCIDRs("deny", denyCIDRs)
+	if err != nil {
+		return nil, err
+	}
+	return &connectACL{
+		allowCIDRs:  allow,
+		denyCIDRs:   deny,
+		denyPrivate: denyPrivate,
+	}, nil
+}
+
+func parseConnectCIDRs(name string, cidrs []string) ([]*net.IPNet, error) {
+	parsed := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("%s CIDR %q: %w", name, cidr, err)
+		}
+		parsed = append(parsed, ipNet)
+	}
+	return parsed, nil
+}
+
+func (a *connectACL) resolveDialAddr(ctx context.Context, dest string) (string, error) {
+	if a == nil {
+		return dest, nil
+	}
+
+	host, port, err := net.SplitHostPort(dest)
+	if err != nil {
+		return "", fmt.Errorf("invalid CONNECT destination %q: %w", dest, err)
+	}
+
+	var ips []net.IP
+	if ip := net.ParseIP(host); ip != nil {
+		ips = []net.IP{ip}
+	} else {
+		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return "", fmt.Errorf("resolve CONNECT destination %q: %w", host, err)
+		}
+		ips = make([]net.IP, 0, len(addrs))
+		for _, addr := range addrs {
+			ips = append(ips, addr.IP)
+		}
+	}
+
+	for _, ip := range ips {
+		if a.allows(ip) {
+			return net.JoinHostPort(ip.String(), port), nil
+		}
+	}
+	return "", fmt.Errorf("CONNECT destination %q rejected by ACL", dest)
+}
+
+func (a *connectACL) allows(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if a.denyPrivate && isPrivateConnectTarget(ip) {
+		return false
+	}
+	for _, cidr := range a.denyCIDRs {
+		if cidr.Contains(ip) {
+			return false
+		}
+	}
+	if len(a.allowCIDRs) == 0 {
+		return true
+	}
+	for _, cidr := range a.allowCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPrivateConnectTarget(ip net.IP) bool {
+	return ip.IsPrivate() ||
+		ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified()
+}
+
+func newTunnelConnPool(backendDialer func(ctx context.Context, network, addr string) (net.Conn, error), dialSem, connSem chan struct{}, connectACL *connectACL) *tunnelConnPool {
 	return &tunnelConnPool{
 		streams:       make(map[uint32]net.Conn),
 		writeChs:      make(map[uint32]chan<- []byte),
@@ -924,6 +1048,7 @@ func newTunnelConnPool(backendDialer func(ctx context.Context, network, addr str
 		backendDialer: backendDialer,
 		dialSem:       dialSem,
 		connSem:       connSem,
+		connectACL:    connectACL,
 	}
 }
 
@@ -945,6 +1070,11 @@ func (p *tunnelConnPool) createForStream(streamID uint32, dest string) (net.Conn
 		return nil, errStreamCanceled
 	}
 
+	dialAddr, err := p.connectACL.resolveDialAddr(pending.ctx, dest)
+	if err != nil {
+		return nil, err
+	}
+
 	// Acquire connection slot first — this provides backpressure when the
 	// tunnel already has maxBackendConnsPerTunnel open backend connections.
 	select {
@@ -964,16 +1094,15 @@ func (p *tunnelConnPool) createForStream(streamID uint32, dest string) (net.Conn
 	defer func() { <-p.dialSem }()
 
 	var conn net.Conn
-	var err error
 	if p.backendDialer != nil {
-		conn, err = p.backendDialer(pending.ctx, "tcp", dest)
+		conn, err = p.backendDialer(pending.ctx, "tcp", dialAddr)
 	} else {
 		dialer := net.Dialer{Timeout: 10 * time.Second}
-		conn, err = dialer.DialContext(pending.ctx, "tcp", dest)
+		conn, err = dialer.DialContext(pending.ctx, "tcp", dialAddr)
 	}
 	if err != nil {
 		<-p.connSem // release slot on dial failure
-		return nil, fmt.Errorf("dial backend %s: %w", dest, err)
+		return nil, fmt.Errorf("dial backend %s: %w", dialAddr, err)
 	}
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetNoDelay(true)
@@ -1287,7 +1416,7 @@ func (ub *udpBackend) close() {
 
 // handleTunnel handles the H2 tunnel after swap with traffic profile pacing.
 func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error {
-	pool := newTunnelConnPool(s.config.BackendDialer, s.dialSem, s.connSem)
+	pool := newTunnelConnPool(s.config.BackendDialer, s.dialSem, s.connSem, s.connectACL)
 	defer pool.closeAll()
 
 	udpBackends := make(map[uint32]*udpBackend)

@@ -4,6 +4,7 @@ package config
 import (
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -69,6 +70,18 @@ type RelayConfig struct {
 	// MetricsToken protects admin endpoints. If empty, admin endpoints are
 	// restricted to loopback clients only.
 	MetricsToken string `yaml:"metrics_token,omitempty"`
+
+	// ConnectAllowCIDRs limits authenticated CONNECT targets to these CIDR
+	// ranges. Empty means no allow-list restriction.
+	ConnectAllowCIDRs []string `yaml:"connect_allow_cidrs,omitempty"`
+
+	// ConnectDenyCIDRs rejects authenticated CONNECT targets in these CIDR
+	// ranges. Deny rules take precedence over allow rules.
+	ConnectDenyCIDRs []string `yaml:"connect_deny_cidrs,omitempty"`
+
+	// ConnectDenyPrivate rejects private, loopback, link-local, multicast, and
+	// unspecified CONNECT targets after authentication.
+	ConnectDenyPrivate bool `yaml:"connect_deny_private,omitempty"`
 }
 
 // ClientConfig is the configuration for the client.
@@ -162,6 +175,12 @@ func (c *RelayConfig) Validate() error {
 	if c.AuthReadTimeout == 0 {
 		c.AuthReadTimeout = 5 * time.Second
 	}
+	if err := validateCIDRs("connect_allow_cidrs", c.ConnectAllowCIDRs); err != nil {
+		return err
+	}
+	if err := validateCIDRs("connect_deny_cidrs", c.ConnectDenyCIDRs); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -193,6 +212,15 @@ func validateHexPSK(field, value string) error {
 	}
 	if len(psk) != 32 {
 		return fmt.Errorf("config: %s must decode to 32 bytes, got %d", field, len(psk))
+	}
+	return nil
+}
+
+func validateCIDRs(field string, cidrs []string) error {
+	for _, cidr := range cidrs {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return fmt.Errorf("config: %s contains invalid CIDR %q: %w", field, cidr, err)
+		}
 	}
 	return nil
 }

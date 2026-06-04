@@ -38,6 +38,14 @@ cloud_region: "us-east-1"
 # If empty, connections are closed naturally on failure (recommended)
 default_backend: ""
 
+# Authenticated CONNECT egress policy.
+# Empty connect_allow_cidrs means "allow any public target unless denied".
+# For production relays, keep connect_deny_private enabled and optionally
+# narrow connect_allow_cidrs to your expected upstream networks.
+connect_deny_private: true
+connect_allow_cidrs: []
+connect_deny_cidrs: []
+
 # TLS handshake relay timeout
 handshake_timeout: 10s
 

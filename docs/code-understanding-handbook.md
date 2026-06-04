@@ -325,21 +325,55 @@ dispatcher 从 H2 engine 读 frame，再投递到对应 stream channel。这里�
 - channel 满：等待。
 - 等待超过 `tunnelIdleTimeout`：关闭底层连接，标记 tunnel dead，后续请求触发重连。
 
-## 7. 根包 Dialer
+## 7. 根包库 API
 
 根包 `chimney.go` 是给其他 Go 项目集成的 API。
 
-### 7.1 `NewDialer`
+对外稳定入口：
+
+- `Config`
+- `DefaultConfig`
+- `ConfigFromYAML`
+- `LoadConfigFile`
+- `Config.Normalize`
+- `NewDialer`
+- `Dialer.DialContext`
+- `Dialer.ListenPacket`
+- `Dialer.Close`
+- `Dialer.IsDead`
+- `Dialer.LastError`
+- `Dialer.Diagnostics`
+
+三方项目接入时只应 import 根包：
+
+```go
+import chimney "github.com/shuffleman/chimney-protocol"
+```
+
+不要 import `internal/config` 或其他 `internal/*` 包；根包已经提供 YAML 加载、默认值和校验能力。
+
+### 7.1 配置入口
+
+`Config` 中的关键字段：
+
+- relay/SNI/auth：`RelayAddr`、`SNI`、`PSK`、`UserID`、`TagLen`
+- 指纹：`Fingerprint`
+- profile/dilution：`ProfilePath`、`PaddingTarget`、`DilutionPath`
+- timeout/pool：`ConnectTimeout`、`HandshakeTimeout`、`PoolSize`、`TCPBufferSize`
+
+`Normalize` 会补默认值、从 `UserID` 派生 PSK，并校验 PSK、tag length、fingerprint。三方项目可以直接构造 `Config`，也可以用 `LoadConfigFile` 从 YAML 加载。
+
+### 7.2 `NewDialer`
 
 初始化逻辑：
 
-- 补默认 `TagLen`、fingerprint、超时、pool size。
+- 调用 `Config.Normalize` 补默认值和校验配置。
 - 如果没有显式 PSK，但有 UserID，则 `PSK = SHA256(UserID)`。
 - 如果 PSK 和 UserID 都没有，直接报错。
 - 可选加载 profile/dilution。
 - 创建 `PoolSize` 条 tunnel。
 
-### 7.2 `newTunnel`
+### 7.3 `newTunnel`
 
 和 CLI 的 `establishTunnel` 类似，但根包是库形态：
 
@@ -352,7 +386,7 @@ dispatcher 从 H2 engine 读 frame，再投递到对应 stream channel。这里�
 - 发送 auth DATA frame。
 - 启动 `dispatchFrames`。
 
-### 7.3 `DialContext`
+### 7.4 `DialContext`
 
 每次调用：
 
@@ -369,7 +403,7 @@ dispatcher 从 H2 engine 读 frame，再投递到对应 stream channel。这里�
 - `0x02`：数据。
 - `0x03`：EOF。
 
-### 7.4 UDP
+### 7.5 UDP
 
 根包提供 `ListenPacket(ctx)`：
 
@@ -443,7 +477,13 @@ key_hint     = SHA256(userID)[:4]
 
 `CheckDestination(sni, ip)` 要求两层都通过。
 
-注意：这个白名单控制的是借用 TLS 握手时的 SNI/真实站点 IP，不控制 swap 成功后的 CONNECT 目标。已认证用户可以让 relay 连接任意目标，这是代理能力，也是部署风险。
+注意：这个白名单控制的是借用 TLS 握手时的 SNI/真实站点 IP。swap 成功后的 CONNECT 目标由 relay 的 CONNECT ACL 控制：
+
+- `connect_deny_private`：拒绝 private、loopback、link-local、multicast、unspecified 地址。
+- `connect_allow_cidrs`：非空时，CONNECT 目标必须落在 allow CIDR 内。
+- `connect_deny_cidrs`：deny 优先级高于 allow。
+
+代码会在认证后的 CONNECT 阶段解析目标 host，选择通过 ACL 的 IP，并使用该 IP 拨号。
 
 ### 8.6 `internal/profile`
 
@@ -542,13 +582,13 @@ CONNECT 后端拨号可能卡在：
 
 这些不是 bug，而是当前代码事实：
 
-- CLI client 不支持 YAML `-config`。
+- CLI client 支持 YAML `-config`，CLI flags 会覆盖 YAML 字段。
 - CLI SOCKS5 只支持 CONNECT，不支持 UDP ASSOCIATE。
 - 根包支持 UDP `ListenPacket`，但只允许一个 UDP PacketConn。
 - relay 的 `profile_dir` 未真正按站点加载。
 - `/admin/refresh-cidrs` 是占位。
 - `default_backend` 为空时，失败连接自然关闭。
-- relay 对 swap 后 CONNECT 目标没有 ACL。
+- relay 对 swap 后 CONNECT 目标已有基础 ACL；生产配置建议开启 `connect_deny_private` 并按需配置 allow/deny CIDR。
 - `InsecureSkipVerify` 是协议设计的一部分，不是普通 HTTPS client 的安全模型。
 - `README` 中部分版本号和命令可能落后，部署以 `docs/developer-deployment-manual.md` 和代码为准。
 

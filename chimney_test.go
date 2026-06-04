@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -169,5 +170,58 @@ func TestNewDialerRequiresCredentials(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected missing credentials error")
+	}
+}
+
+func TestConfigFromYAMLAppliesDefaultsAndDerivesPSK(t *testing.T) {
+	cfg, err := ConfigFromYAML([]byte(`
+relay_addr: "relay.example.com:443"
+sni: "cloudflare.com"
+user_id: "550e8400-e29b-41d4-a716-446655440000"
+pool_size: 2
+connect_timeout: 2s
+handshake_timeout: 3s
+`))
+	if err != nil {
+		t.Fatalf("ConfigFromYAML failed: %v", err)
+	}
+	if cfg.PSK == "" {
+		t.Fatal("expected PSK to be derived from user_id")
+	}
+	if cfg.TagLen != 16 {
+		t.Fatalf("TagLen = %d, want 16", cfg.TagLen)
+	}
+	if cfg.Fingerprint != "chrome" {
+		t.Fatalf("Fingerprint = %q, want chrome", cfg.Fingerprint)
+	}
+	if cfg.ConnectTimeout != 2*time.Second {
+		t.Fatalf("ConnectTimeout = %v, want 2s", cfg.ConnectTimeout)
+	}
+	if cfg.HandshakeTimeout != 3*time.Second {
+		t.Fatalf("HandshakeTimeout = %v, want 3s", cfg.HandshakeTimeout)
+	}
+	if cfg.PoolSize != 2 {
+		t.Fatalf("PoolSize = %d, want 2", cfg.PoolSize)
+	}
+}
+
+func TestConfigNormalizeRejectsInvalidPSK(t *testing.T) {
+	cfg := Config{
+		RelayAddr: "relay.example.com:443",
+		SNI:       "cloudflare.com",
+		PSK:       "not-hex",
+	}
+	if err := cfg.Normalize(); err == nil {
+		t.Fatal("expected invalid PSK error")
+	}
+}
+
+func TestDialerDialContextMatchesHTTPTransport(t *testing.T) {
+	var d *Dialer
+	transport := &http.Transport{
+		DialContext: d.DialContext,
+	}
+	if transport.DialContext == nil {
+		t.Fatal("DialContext adapter is nil")
 	}
 }

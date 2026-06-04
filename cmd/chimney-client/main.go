@@ -25,6 +25,7 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 	"github.com/shuffleman/chimney-protocol/internal/auth"
+	cfgpkg "github.com/shuffleman/chimney-protocol/internal/config"
 	"github.com/shuffleman/chimney-protocol/internal/dilution"
 	"github.com/shuffleman/chimney-protocol/internal/h2engine"
 	"github.com/shuffleman/chimney-protocol/internal/keyderiv"
@@ -53,6 +54,7 @@ const (
 
 func main() {
 	var (
+		configPath     = flag.String("config", "", "Path to client configuration file")
 		relayAddr      = flag.String("relay", "", "Relay address (host:port)")
 		sni            = flag.String("sni", "", "SNI to use (whitelisted site)")
 		destAddr       = flag.String("dest", "", "Final destination (host:port)")
@@ -67,15 +69,29 @@ func main() {
 	)
 	flag.Parse()
 
-	if *relayAddr == "" || *sni == "" || *destAddr == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s -relay <host:port> -sni <site> -dest <host:port> [-psk <hex> | -user-id <uuid>]\n", os.Args[0])
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
+	explicitFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		explicitFlags[f.Name] = true
+	})
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
+
+	if *configPath != "" {
+		cfg, err := cfgpkg.LoadClientConfig(*configPath)
+		if err != nil {
+			logger.Error("failed to load client configuration", "path", *configPath, "error", err)
+			os.Exit(1)
+		}
+		applyClientConfig(cfg, explicitFlags, relayAddr, sni, destAddr, pskHex, tagLen, listenAddr, fingerprintStr, userID)
+	}
+
+	if *relayAddr == "" || *sni == "" || *destAddr == "" {
+		fmt.Fprintf(os.Stderr, "Usage: %s [-config client.yaml] -relay <host:port> -sni <site> -dest <host:port> [-psk <hex> | -user-id <uuid>]\n", os.Args[0])
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
 
 	// Create client
 	fingerprints := strings.Split(*fingerprintStr, ",")
@@ -144,6 +160,44 @@ func main() {
 	if err := client.Run(); err != nil {
 		logger.Error("client failed", "error", err)
 		os.Exit(1)
+	}
+}
+
+func applyClientConfig(
+	cfg *cfgpkg.ClientConfig,
+	explicitFlags map[string]bool,
+	relayAddr *string,
+	sni *string,
+	destAddr *string,
+	pskHex *string,
+	tagLen *int,
+	listenAddr *string,
+	fingerprintStr *string,
+	userID *string,
+) {
+	if !explicitFlags["relay"] {
+		*relayAddr = cfg.RelayAddr
+	}
+	if !explicitFlags["sni"] {
+		*sni = cfg.SNI
+	}
+	if !explicitFlags["dest"] {
+		*destAddr = cfg.DestAddr
+	}
+	if !explicitFlags["psk"] {
+		*pskHex = cfg.PSK
+	}
+	if !explicitFlags["tag-len"] {
+		*tagLen = cfg.TagLen
+	}
+	if !explicitFlags["listen"] {
+		*listenAddr = cfg.ListenAddr
+	}
+	if !explicitFlags["fingerprint"] {
+		*fingerprintStr = cfg.UTlsFingerprint
+	}
+	if !explicitFlags["user-id"] {
+		*userID = cfg.UserID
 	}
 }
 

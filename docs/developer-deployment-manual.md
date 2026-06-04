@@ -11,8 +11,10 @@
 - `cmd/chimney-relay` 是服务端二进制，部署在公网 Linux 机器上。
 - `cmd/chimney-client` 是本地 SOCKS5 客户端，通常运行在开发者 Windows 机器或用户本机。
 - 根目录 `chimney.go` 导出 Go 库 Dialer API，给 sing-box、Xray-core 或其他 Go 程序集成使用。
-- `config/client.yaml.example` 当前只是配置包支持的示例；`cmd/chimney-client` 目前不支持 `-config`，只能用 flags。
-- `Makefile run-client` 里仍写着 `-config config/client.yaml`，这与当前 client CLI 不一致，不能直接作为真实启动命令使用。
+- 三方库接入优先阅读 `docs/library-integration-guide.md`；外部项目只依赖根包，不依赖 `internal/*`。
+- sing-box/Xray 的接入层由对应项目维护；Chimney 仓库只发布根模块和 relay/client 二进制。
+- `config/client.yaml.example` 可被 `cmd/chimney-client -config` 读取，CLI flags 会覆盖 YAML 字段。
+- `Makefile run-client` 使用 flags 模式；`make run-client-config` 使用 YAML 模式。
 - `docs/project-analysis.md` 是项目地图；本文档才是部署和开发交接手册。
 
 ## 1. 当前真实部署拓扑
@@ -253,7 +255,19 @@ make test
 make run-client
 ```
 
-原因：当前 Makefile 仍调用 `chimney-client -config config/client.yaml`，但当前 `cmd/chimney-client` 没有 `-config` 参数。
+当前 `cmd/chimney-client` 已支持 `-config`。如果使用 Makefile，可用 flags 模式：
+
+```powershell
+make run-client RELAY_ADDR=127.0.0.1:8444 SNI=cloudflare.com USER_ID=dev-user
+```
+
+也可用 YAML 模式：
+
+```powershell
+make run-client-config CLIENT_CONFIG=config/client.yaml
+```
+
+CLI flags 会覆盖 YAML 中的同名字段。
 
 ## 5. 配置文件详解
 
@@ -280,6 +294,9 @@ make run-client
 | `log_level` | string | 否 | `debug`、`info`、`warn`、`error` |
 | `metrics_addr` | string | 否 | 启动 JSON admin API，不是 Prometheus 文本指标 |
 | `metrics_token` | string | 否 | Admin API token；为空时 `/admin/*` 仅允许 loopback client |
+| `connect_allow_cidrs` | list | 否 | 认证后 CONNECT 目标 allow-list；为空表示不启用 allow 限制 |
+| `connect_deny_cidrs` | list | 否 | 认证后 CONNECT 目标 deny-list；优先级高于 allow |
+| `connect_deny_private` | bool | 否 | 拒绝 private、loopback、link-local、multicast、unspecified 目标 |
 
 当前速度测试配置 `config/relay-speedtest.yaml`：
 
@@ -296,6 +313,26 @@ auth_read_timeout: 5s
 enable_profiling: false
 log_level: "debug"
 ```
+
+生产环境建议显式开启 CONNECT 出口限制：
+
+```yaml
+connect_deny_private: true
+connect_allow_cidrs: []
+connect_deny_cidrs: []
+```
+
+如需限制只能访问某些公网段：
+
+```yaml
+connect_deny_private: true
+connect_allow_cidrs:
+  - "203.0.113.0/24"
+connect_deny_cidrs:
+  - "203.0.113.10/32"
+```
+
+relay 会在认证后的 CONNECT 阶段解析目标 host，按 ACL 选择通过校验的 IP，并使用该 IP 发起实际拨号。这样可以减少 DNS 检查与实际拨号目标不一致的风险。
 
 ### 5.2 认证模式
 
@@ -381,13 +418,13 @@ cloudflare.com:
 
 ### 5.5 client.yaml.example 的真实状态
 
-`internal/config` 里有 `ClientConfig` 和 `LoadClientConfig`，但当前 `cmd/chimney-client/main.go` 没有 `-config` flag。
+`internal/config` 里有 `ClientConfig` 和 `LoadClientConfig`，当前 `cmd/chimney-client/main.go` 已支持 `-config` flag。
 
 因此：
 
 - 外部 Go 程序可以复用配置结构。
-- CLI 用户必须使用命令行 flags。
-- 不要给部署脚本写 `chimney-client -config config/client.yaml`，除非先实现这个功能。
+- CLI 用户可以使用 `chimney-client -config config/client.yaml`。
+- 临时覆盖时继续追加 flags，例如 `-listen 127.0.0.1:2080`。
 
 ## 6. 本地单机开发流程
 
@@ -922,6 +959,34 @@ go test -tags stress -run TestLocalMixedTrafficStress -count=1 -timeout 3m -v
 
 ### 12.5 真实二进制链路验收
 
+推荐先跑自动化 harness：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-binaries.ps1
+```
+
+脚本会构建 `chimney-relay.exe`、`chimney-client.exe`、`socks_stress.exe`，生成临时 YAML，启动真实 relay/client 进程，然后通过 SOCKS5 对本地 backend 做混合上传/下载校验。默认 SOCKS 监听是 `127.0.0.1:18080`，避免和开发者常用的 `127.0.0.1:1080` 冲突。
+
+更大压力：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-binaries.ps1 `
+  -DownloadWorkers 12 `
+  -UploadWorkers 12 `
+  -BytesPerWorker 8388608 `
+  -TimeoutSeconds 120
+```
+
+relay 重启恢复检查：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-binaries.ps1 -ReconnectCheck
+```
+
+这个检查会先跑一轮 SOCKS5 流量，然后停止 relay、保持 client 进程存活、重新启动 relay，再跑第二轮流量。第二轮成功表示 client 的懒重连路径仍然有效。
+
+手动链路如下。
+
 本地 relay：
 
 ```powershell
@@ -944,6 +1009,12 @@ SOCKS 压测：
 
 ```powershell
 .\build\bin\socks_stress.exe -socks 127.0.0.1:1080 -dl 12 -ul 12 -bytes 8388608 -timeout 180s
+```
+
+机器可读输出：
+
+```powershell
+.\build\bin\socks_stress.exe -socks 127.0.0.1:1080 -dl 12 -ul 12 -bytes 8388608 -timeout 180s -json
 ```
 
 远端公网验收：
@@ -1325,6 +1396,8 @@ ssh -p 15042 root@103.135.147.226 "journalctl -u chimney-relay.service -n 100 --
 ```powershell
 go test ./...
 go vet ./...
+staticcheck ./...
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-binaries.ps1 -ReconnectCheck
 git status --short
 ```
 
@@ -1350,17 +1423,24 @@ git tag -a vX.Y.Z -m "vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
+推送 `v*` tag 会触发 `.github/workflows/release.yml`：
+
+- 运行 `go test ./...`。
+- 构建 Linux、Windows、macOS 的 relay/client 二进制。
+- 生成 `SHA256SUMS`。
+- 创建 GitHub Release 并上传 artifact。
+
 注意：
 
 - 发布 tag 前确认 HEAD 是你要发布的提交。
 - 如果工作区有 `.spec-workflow/templates/*` 之类无关修改，不要混入文档或功能提交。
-- 若要发布二进制，先在干净环境构建，避免 GOOS/GOARCH 残留。
+- 如需本地复核二进制，可先运行 `make build-all`。
 
 ## 18. 当前实现边界
 
 接手开发时尤其注意这些边界：
 
-- CLI client 不读取 YAML config。
+- CLI client 支持 YAML `-config`，CLI flags 会覆盖 YAML 字段。
 - CLI client 只提供 SOCKS5 CONNECT，不支持 SOCKS5 UDP ASSOCIATE。
 - 根包支持 UDP `ListenPacket`，但这不是 CLI SOCKS UDP。
 - CLI client 是单 tunnel；根包 Dialer 才有 `PoolSize` tunnel pool。
@@ -1368,7 +1448,7 @@ git push origin vX.Y.Z
 - dilution 当前由 client/root package 发送预录制内容块，relay 识别 reserved stream 后丢弃。
 - Admin API 支持 token 鉴权；未配置 token 时只允许 loopback client。
 - `/admin/refresh-cidrs` 当前仍偏占位。
-- Makefile `run-client` 与当前 CLI 不匹配。
+- Makefile 已提供 flags 模式 `run-client` 和 YAML 模式 `run-client-config`。
 - README 中部分协议描述偏设计视角，真实实现以代码为准。
 - `Chimney-完整设计与实现规格.md` 是设计规格，不保证每段都与当前实现同步。
 
@@ -1376,12 +1456,12 @@ git push origin vX.Y.Z
 
 优先级从高到低：
 
-1. 给 `cmd/chimney-client` 增加 `-config`，复用 `internal/config.ClientConfig`。
-2. 更新 Makefile `run-client`，避免继续使用不存在的 `-config` 参数。
+1. 增加自动化集成测试：启动真实 relay/client/backend，通过 SOCKS5 发流量。
+2. 增加断线重连测试：kill relay、重启 relay，确认 client 新请求恢复。
 3. 让 CLI client 可选复用根包 `Dialer`，减少两套 tunnel 管理逻辑。
 4. 给 CLI client 增加主动健康检查或 idle keepalive，让断线不必等下一次请求才发现。
-5. 增加自动化集成测试：启动真实 relay/client，kill relay，确认 client 自动重连。
-6. 完善 relay graceful shutdown，避免 systemd restart 长时间 deactivating。
+5. 完善 relay graceful shutdown，避免 systemd restart 长时间 deactivating。
+6. 给 CONNECT ACL 增加集成测试、审计日志和生产模板。
 7. 给 admin API 增加更完整的权限模型、审计日志和限流。
 8. 实现真实 CIDR refresh，并让 `/admin/refresh-cidrs` 调用实际逻辑。
 9. 明确 profile 加载策略，让 `intent.yaml` 的 SETTINGS/profile 与 H2 engine 配置闭环。

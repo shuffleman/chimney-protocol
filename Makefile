@@ -1,7 +1,7 @@
 # Chimney — Behaviorally Indistinguishable Session-Parasitic Transport
 # Makefile for building, testing, and deployment.
 
-.PHONY: all build test clean install fmt vet lint
+.PHONY: all build build-all test test-race test-coverage integration-local integration-reconnect check clean install fmt fmt-check vet staticcheck lint
 
 # Go parameters
 GOCMD=go
@@ -11,6 +11,7 @@ GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 GOFMT=gofmt
 GOVET=$(GOCMD) vet
+STATICCHECK=staticcheck
 
 # Binary names
 RELAY_BINARY=chimney-relay
@@ -22,6 +23,16 @@ BIN_DIR=$(BUILD_DIR)/bin
 
 # Installation directory
 PREFIX=/usr/local
+
+# Local run defaults. Override from the command line, for example:
+#   make run-client RELAY_ADDR=127.0.0.1:8444 SNI=cloudflare.com USER_ID=dev-user
+RELAY_ADDR ?= 127.0.0.1:8444
+SNI ?= cloudflare.com
+DEST_ADDR ?= 127.0.0.1:1
+USER_ID ?= dev-user
+LISTEN_ADDR ?= 127.0.0.1:1080
+FINGERPRINT ?= chrome
+CLIENT_CONFIG ?= config/client.yaml
 
 # Default target: build all binaries
 all: build
@@ -41,10 +52,38 @@ build-client:
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -o $(BIN_DIR)/$(CLIENT_BINARY) ./cmd/chimney-client
 
+# Build release-like binaries for common platforms.
+build-all:
+	@echo "Building cross-platform binaries..."
+	@mkdir -p $(BIN_DIR)
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(RELAY_BINARY)-linux-amd64 ./cmd/chimney-relay
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(CLIENT_BINARY)-linux-amd64 ./cmd/chimney-client
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(RELAY_BINARY)-windows-amd64.exe ./cmd/chimney-relay
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(CLIENT_BINARY)-windows-amd64.exe ./cmd/chimney-client
+	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(RELAY_BINARY)-darwin-amd64 ./cmd/chimney-relay
+	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(CLIENT_BINARY)-darwin-amd64 ./cmd/chimney-client
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(RELAY_BINARY)-darwin-arm64 ./cmd/chimney-relay
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 $(GOBUILD) -ldflags="-w -s" -o $(BIN_DIR)/$(CLIENT_BINARY)-darwin-arm64 ./cmd/chimney-client
+
 # Run all tests
 test:
 	@echo "Running tests..."
+	$(GOTEST) -v ./...
+
+# Run race tests. Requires cgo and a working C compiler.
+test-race:
+	@echo "Running race tests..."
 	$(GOTEST) -v -race ./...
+
+# Run a local binary integration smoke/stress test on Windows PowerShell.
+integration-local:
+	@echo "Running local binary integration test..."
+	pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-binaries.ps1
+
+# Run local binary integration and verify client recovery after relay restart.
+integration-reconnect:
+	@echo "Running local reconnect integration test..."
+	pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-binaries.ps1 -ReconnectCheck
 
 # Run tests with coverage
 test-coverage:
@@ -57,10 +96,24 @@ fmt:
 	@echo "Formatting..."
 	$(GOFMT) -w -s ./internal ./cmd
 
+# Verify formatting without modifying files.
+fmt-check:
+	@echo "Checking formatting..."
+	@test -z "$$($(GOFMT) -l ./internal ./cmd)"
+
 # Run go vet
 vet:
 	@echo "Running go vet..."
 	$(GOVET) ./...
+
+# Run staticcheck.
+staticcheck:
+	@echo "Running staticcheck..."
+	$(STATICCHECK) ./...
+
+# Standard local quality gate.
+check: fmt-check vet staticcheck test
+	@echo "Checks complete"
 
 # Run linter (golangci-lint)
 lint:
@@ -108,7 +161,17 @@ run-relay: build-relay
 
 # Run client
 run-client: build-client
-	$(BIN_DIR)/$(CLIENT_BINARY) -config config/client.yaml
+	$(BIN_DIR)/$(CLIENT_BINARY) \
+		-relay $(RELAY_ADDR) \
+		-sni $(SNI) \
+		-dest $(DEST_ADDR) \
+		-user-id $(USER_ID) \
+		-listen $(LISTEN_ADDR) \
+		-fingerprint $(FINGERPRINT)
+
+# Run client from YAML config. CLI flags still override config when supplied.
+run-client-config: build-client
+	$(BIN_DIR)/$(CLIENT_BINARY) -config $(CLIENT_CONFIG)
 
 # Docker build
 docker-build:
@@ -146,12 +209,19 @@ help:
 	@echo ""
 	@echo "  all              - Build all binaries (default)"
 	@echo "  build            - Build relay and client"
+	@echo "  build-all        - Build common release binaries"
 	@echo "  build-relay      - Build relay server only"
 	@echo "  build-client     - Build client only"
-	@echo "  test             - Run all tests"
+	@echo "  test             - Run all tests without race detector"
+	@echo "  test-race        - Run race tests (requires cgo/C compiler)"
+	@echo "  integration-local - Run local relay/client binary integration test"
+	@echo "  integration-reconnect - Verify client recovery after relay restart"
 	@echo "  test-coverage    - Run tests with coverage report"
 	@echo "  fmt              - Format Go source files"
+	@echo "  fmt-check        - Check Go formatting without modifying files"
 	@echo "  vet              - Run go vet"
+	@echo "  staticcheck      - Run staticcheck"
+	@echo "  check            - Run fmt-check, vet, staticcheck, and tests"
 	@echo "  lint             - Run golangci-lint"
 	@echo "  tidy             - Tidy Go modules"
 	@echo "  deps             - Download dependencies"
@@ -160,7 +230,8 @@ help:
 	@echo "  uninstall        - Remove installed binaries"
 	@echo "  genkey           - Generate a new PSK"
 	@echo "  run-relay        - Build and run relay server"
-	@echo "  run-client       - Build and run client"
+	@echo "  run-client       - Build and run client with Makefile variables"
+	@echo "  run-client-config - Build and run client with CLIENT_CONFIG"
 	@echo "  docker-build     - Build Docker images"
 	@echo "  bench            - Run benchmarks"
 	@echo "  ci               - Run CI pipeline (fmt, vet, test, build)"

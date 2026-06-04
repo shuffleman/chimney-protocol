@@ -93,7 +93,7 @@ Linux/systemd 部署时，本项目已验证可用：
   -fingerprint chrome
 ```
 
-注意：`config/client.yaml.example` 是给 `internal/config.LoadClientConfig` 使用的模板；`cmd/chimney-client` 当前使用 CLI flags，不读取 `-config`。
+注意：`config/client.yaml.example` 可被 `cmd/chimney-client -config` 读取；CLI flags 会覆盖配置文件中的同名字段。
 
 ### 3.3 Go 库 Dialer
 
@@ -409,7 +409,8 @@ go test -tags stress -run TestLocalMixedTrafficStress -count=1 -timeout 3m -v
 ## 15. 建议后续整理
 
 - 把根包 Dialer 和 CLI client 的 tunnel 管理逻辑收敛，减少双实现漂移。
-- 为 CLI client 增加 `-config`，复用 `internal/config.ClientConfig`。
+- 为 CLI client 和根包 Dialer 收敛共享 tunnel/core，减少双实现漂移。
+- 为 CONNECT ACL 增加自动化集成测试和审计日志。
 - 给 relay 增加真实 `profile_dir` 加载逻辑。
 - 将 admin API 的 `refresh-cidrs` 从占位实现改为可观测任务。
 - 增加针对“relay kill 后 CLI client 自动重连”的自动化集成测试。

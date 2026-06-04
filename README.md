@@ -320,12 +320,21 @@ chimney-client -user-id "550e8400-e29b-41d4-a716-446655440000" ...
 
 ## 库集成 (sing-box / Xray-core) / Library Integration
 
+完整接入手册见 [docs/library-integration-guide.md](docs/library-integration-guide.md)。下面是根包 API 摘要。
+
 `chimney` 根包导出一个 `Dialer`，实现 `DialContext(ctx, network, addr) (net.Conn, error)` — 与 sing-box 的 `V2RayClientTransport` 和 Xray-core 的 `internet.Dialer` 接口兼容。
 
 ### API 参考 / API Reference
 
 ```go
 import "github.com/shuffleman/chimney-protocol"
+```
+
+配置可直接构造，也可用根包 YAML loader：
+
+```go
+cfg, err := chimney.LoadConfigFile("chimney.yaml")
+d, err := chimney.NewDialer(cfg)
 ```
 
 #### `Config`
@@ -549,7 +558,7 @@ chimney/
 │   └── whitelist/               # 双层白名单
 ├── config/
 │   ├── relay.yaml.example       # Relay 配置模板
-│   ├── client.yaml.example      # Client 配置模板（配置包支持；CLI 当前不读取 -config）
+│   ├── client.yaml.example      # Client 配置模板（CLI 支持 -config，flags 可覆盖）
 │   ├── intent.yaml              # 意图白名单
 │   └── enforce.yaml             # 执行层 CIDR
 ├── go.mod

@@ -1,6 +1,8 @@
 # Chimney Client Configuration
-# Template for internal/config.LoadClientConfig users.
-# Note: cmd/chimney-client currently uses CLI flags and does not read -config.
+# Copy this file to client.yaml and run:
+#   chimney-client -config config/client.yaml
+#
+# CLI flags override values loaded from this file.
 
 # Relay server address (host:port)
 relay_addr: "relay.example.com:443"
