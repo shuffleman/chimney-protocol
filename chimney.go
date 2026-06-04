@@ -665,13 +665,14 @@ func (u *udpConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		deadline := u.readDeadline
 		u.mu.Unlock()
 
-		var timeout <-chan time.Time
-		if !deadline.IsZero() {
-			timeout = time.After(time.Until(deadline))
+		timer, expired := deadlineTimer(deadline)
+		if expired {
+			return 0, nil, &net.OpError{Op: "read", Net: "udp", Err: &timeoutError{}}
 		}
 
 		select {
 		case sf, ok := <-u.stream.ch:
+			stopTimer(timer)
 			if !ok {
 				return 0, nil, net.ErrClosed
 			}
@@ -684,13 +685,16 @@ func (u *udpConn) ReadFrom(b []byte) (int, net.Addr, error) {
 				continue
 			}
 			return n, addr, nil
-		case <-timeout:
+		case <-timerC(timer):
 			return 0, nil, &net.OpError{Op: "read", Net: "udp", Err: &timeoutError{}}
 		case <-u.stream.closed:
+			stopTimer(timer)
 			return 0, nil, net.ErrClosed
 		case <-u.t.quit:
+			stopTimer(timer)
 			return 0, nil, io.ErrClosedPipe
 		case <-u.readDeadlineChangedChan():
+			stopTimer(timer)
 			continue
 		}
 	}

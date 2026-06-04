@@ -424,6 +424,21 @@ func TestNewEngine(t *testing.T) {
 	}
 }
 
+func TestEngineCompactReadBufferReleasesLargeCapacity(t *testing.T) {
+	codec, err := record.NewCodec(make([]byte, 16), make([]byte, 12))
+	if err != nil {
+		t.Fatalf("Failed to create codec: %v", err)
+	}
+	engine := NewEngine(DefaultSettings(), codec)
+	engine.readBuf = make([]byte, 0, DefaultMaxFrameSize*8)
+
+	engine.compactReadBuffer()
+
+	if got, want := cap(engine.readBuf), DefaultMaxFrameSize*2; got != want {
+		t.Fatalf("read buffer capacity = %d, want %d", got, want)
+	}
+}
+
 func TestFrameConstants(t *testing.T) {
 	// 验证帧类型常量
 	if FrameData != 0x0 {

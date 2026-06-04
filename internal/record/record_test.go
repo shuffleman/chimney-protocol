@@ -45,6 +45,21 @@ func TestNewCodec(t *testing.T) {
 	}
 }
 
+func TestRecordReaderCompactBufferReleasesLargeCapacity(t *testing.T) {
+	codec, err := NewCodec(generateTestKey(t), generateTestNonce(t))
+	if err != nil {
+		t.Fatalf("NewCodec failed: %v", err)
+	}
+	reader := NewRecordReader(bytes.NewReader(nil), codec)
+	reader.buf = make([]byte, 0, MaxBufSize)
+
+	reader.compactBuffer()
+
+	if got, want := cap(reader.buf), MaxRecordLen*2; got != want {
+		t.Fatalf("buffer capacity = %d, want %d", got, want)
+	}
+}
+
 func TestCodec_EncodeDecode(t *testing.T) {
 	key := generateTestKey(t)
 	nonce := generateTestNonce(t)

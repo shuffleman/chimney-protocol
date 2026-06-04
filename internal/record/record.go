@@ -542,6 +542,7 @@ func (rr *RecordReader) ReadRecord() ([]byte, error) {
 					return nil, err
 				}
 				rr.buf = rr.buf[result.Consumed:]
+				rr.compactBuffer()
 				return result.Plaintext, nil
 			}
 		}
@@ -579,10 +580,17 @@ func (rr *RecordReader) ReadRecord() ([]byte, error) {
 					return nil, io.ErrUnexpectedEOF
 				}
 				rr.buf = rr.buf[result.Consumed:]
+				rr.compactBuffer()
 				return result.Plaintext, nil
 			}
 			return nil, err
 		}
+	}
+}
+
+func (rr *RecordReader) compactBuffer() {
+	if len(rr.buf) == 0 && cap(rr.buf) > MaxRecordLen*2 {
+		rr.buf = make([]byte, 0, MaxRecordLen*2)
 	}
 }
 

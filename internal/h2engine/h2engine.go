@@ -387,10 +387,10 @@ func (e *Engine) CodecTrails() (sealerTrail, openerTrail string) {
 }
 
 // InitiateAsClient 执行客户端侧 H2 开启序列：
-//   1. 发送前导 + SETTINGS
-//   2. 接收服务器 SETTINGS
-//   3. 发送 SETTINGS ACK
-//   4. 接收 SETTINGS ACK
+//  1. 发送前导 + SETTINGS
+//  2. 接收服务器 SETTINGS
+//  3. 发送 SETTINGS ACK
+//  4. 接收 SETTINGS ACK
 func (e *Engine) InitiateAsClient() error {
 	if e.recordWriter == nil {
 		return errors.New("h2engine: record writer not set")
@@ -416,11 +416,11 @@ func (e *Engine) InitiateAsClient() error {
 }
 
 // AcceptAsServer 执行服务器侧 H2 开启序列：
-//   1. 读取并验证客户端前导
-//   2. 读取客户端 SETTINGS
-//   3. 发送服务器 SETTINGS
-//   4. 发送 SETTINGS ACK
-//   5. 读取客户端 SETTINGS ACK
+//  1. 读取并验证客户端前导
+//  2. 读取客户端 SETTINGS
+//  3. 发送服务器 SETTINGS
+//  4. 发送 SETTINGS ACK
+//  5. 读取客户端 SETTINGS ACK
 func (e *Engine) AcceptAsServer() error {
 	if e.recordReader == nil {
 		return errors.New("h2engine: record reader not set")
@@ -706,6 +706,7 @@ func (e *Engine) ReadFrame() (*FrameHeader, []byte, error) {
 				payload := make([]byte, fh.Length)
 				copy(payload, e.readBuf[FrameHeaderLen:totalLen])
 				e.readBuf = e.readBuf[totalLen:]
+				e.compactReadBuffer()
 
 				e.mu.Unlock()
 
@@ -725,8 +726,14 @@ func (e *Engine) ReadFrame() (*FrameHeader, []byte, error) {
 	}
 }
 
+func (e *Engine) compactReadBuffer() {
+	if len(e.readBuf) == 0 && cap(e.readBuf) > DefaultMaxFrameSize*2 {
+		e.readBuf = make([]byte, 0, DefaultMaxFrameSize*2)
+	}
+}
+
 // GenerateClientOpeningSequence 生成交换后出现的完整客户端开启序列
-//（前导 + SETTINGS + ACK）。
+// （前导 + SETTINGS + ACK）。
 // 客户端使用此函数产生初始记录。
 func GenerateClientOpeningSequence(settings *Settings) []byte {
 	var buf bytes.Buffer
@@ -736,7 +743,7 @@ func GenerateClientOpeningSequence(settings *Settings) []byte {
 }
 
 // GenerateServerOpeningSequence 生成服务器侧开启序列
-//（SETTINGS + ACK）。
+// （SETTINGS + ACK）。
 func GenerateServerOpeningSequence(settings *Settings) []byte {
 	var buf bytes.Buffer
 	buf.Write(settings.EncodeSettings(false))
