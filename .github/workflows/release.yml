@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -51,12 +53,38 @@ jobs:
               ext=".exe"
             fi
 
-            for cmd in chimney-relay chimney-client; do
+            for cmd in chimney-relay chimney-client udp_stress; do
               out="dist/${cmd}-${version}-${suffix}${ext}"
               CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
                 go build -trimpath -ldflags="-s -w" -o "${out}" "./cmd/${cmd}"
             done
           done
+
+      - name: Generate SBOM
+        run: go run ./scripts/generate-spdx-sbom.go -version "${GITHUB_REF_NAME}" -output "dist/chimney-${GITHUB_REF_NAME}.spdx.json"
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous_tag="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          {
+            echo "## Changes"
+            echo
+            if [[ -n "${previous_tag}" ]]; then
+              git log --pretty=format:"- %s (%h)" "${previous_tag}..${GITHUB_REF_NAME}"
+            else
+              git log --pretty=format:"- %s (%h)" "${GITHUB_REF_NAME}"
+            fi
+            echo
+            echo
+            echo "## Artifacts"
+            echo
+            echo "- Multi-platform relay/client binaries"
+            echo "- UDP PacketConn stress utility"
+            echo "- SHA256SUMS"
+            echo "- SPDX SBOM"
+          } > dist/RELEASE_NOTES.md
 
       - name: Generate checksums
         working-directory: dist
@@ -75,4 +103,4 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" dist/* \
             --title "Chimney ${GITHUB_REF_NAME}" \
-            --notes "Automated release for ${GITHUB_REF_NAME}."
+            --notes-file dist/RELEASE_NOTES.md

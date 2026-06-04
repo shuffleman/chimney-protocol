@@ -44,7 +44,7 @@
 - 根包 Dialer 与 CLI client 仍存在重复 tunnel 实现，这是库接入长期维护的主要风险。
 - relay 的 CONNECT 出口 ACL 已有基础实现，但还缺更完整的生产模板、审计日志和集成测试。
 - admin API 还缺少完整权限模型、审计和真实 refresh-cidrs。
-- release artifact 和 checksums 已有 GitHub Actions 初版；SBOM、changelog、签名还没有自动化。
+- release artifact、checksums、SPDX SBOM 和按 tag 区间生成的 release notes 已有 GitHub Actions 初版；签名和手写 CHANGELOG 还没有自动化。
 - sing-box/Xray 接入层由各自项目维护；Chimney 只发布根模块 API。
 - 真实网络场景的集成测试和 soak/stress 体系还不完整。
 - 断线重连已有本地二进制 smoke 测试；还缺长时间 soak 和远端公网自动化。
@@ -153,7 +153,7 @@
 
 - systemd unit 模板。
 - Docker image 版本 tag。
-- release workflow：构建多平台二进制、checksums、SBOM、release notes。基础完成：二进制、checksums、GitHub Release；SBOM/release notes 仍需增强。
+- release workflow：构建多平台二进制、checksums、SBOM、release notes。基础完成：relay/client/udp_stress 二进制、checksums、SPDX SBOM、GitHub Release 和按 tag 区间生成的 release notes；签名和 CHANGELOG 仍需增强。
 - CHANGELOG。
 - 运行手册：部署、升级、回滚、故障排查。
 
@@ -218,4 +218,4 @@
 - 建本地集成测试 harness：relay + client + backend + SOCKS5 流量。
 - 把 CONNECT ACL 纳入集成测试，覆盖公网允许、内网拒绝、deny CIDR 优先。
 - 补断线重连测试：relay 退出、重启、client 新请求恢复。
-- 增强 release workflow：SBOM、签名、CHANGELOG/release notes。
+- 增强 release workflow：artifact 签名、CHANGELOG 生成、release 前后自动验收。
