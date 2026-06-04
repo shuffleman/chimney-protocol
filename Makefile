@@ -1,7 +1,7 @@
 # Chimney — Behaviorally Indistinguishable Session-Parasitic Transport
 # Makefile for building, testing, and deployment.
 
-.PHONY: all build build-all test test-race test-coverage integration-local integration-reconnect check clean install fmt fmt-check vet staticcheck lint
+.PHONY: all build build-all test test-race test-coverage integration-local integration-reconnect soak-local check clean install fmt fmt-check vet staticcheck lint
 
 # Go parameters
 GOCMD=go
@@ -84,6 +84,11 @@ integration-local:
 integration-reconnect:
 	@echo "Running local reconnect integration test..."
 	pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-binaries.ps1 -ReconnectCheck
+
+# Run a longer local binary soak test and emit a JSON memory report.
+soak-local:
+	@echo "Running local binary soak test..."
+	pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-soak.ps1
 
 # Run tests with coverage
 test-coverage:
@@ -216,6 +221,7 @@ help:
 	@echo "  test-race        - Run race tests (requires cgo/C compiler)"
 	@echo "  integration-local - Run local relay/client binary integration test"
 	@echo "  integration-reconnect - Verify client recovery after relay restart"
+	@echo "  soak-local       - Run local relay/client soak test with memory report"
 	@echo "  test-coverage    - Run tests with coverage report"
 	@echo "  fmt              - Format Go source files"
 	@echo "  fmt-check        - Check Go formatting without modifying files"

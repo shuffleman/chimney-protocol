@@ -985,6 +985,29 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-binaries.ps1 -R
 
 这个检查会先跑一轮 SOCKS5 流量，然后停止 relay、保持 client 进程存活、重新启动 relay，再跑第二轮流量。第二轮成功表示 client 的懒重连路径仍然有效。
 
+本地长时间 soak 检查：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-soak.ps1 `
+  -DownloadWorkers 8 `
+  -UploadWorkers 8 `
+  -BytesPerWorker 8388608 `
+  -Iterations 30 `
+  -IntervalSeconds 2 `
+  -ReconnectHalfway
+```
+
+`test-local-soak.ps1` 会启动真实 relay/client 二进制，多轮运行 `socks_stress -json`，并在每轮前后采样 relay/client 进程的 working set、private memory、virtual memory、handle count 和 thread count。默认报告写入 `build/local-soak/soak-report.json`。用于追踪长时间上传/下载后 client 或 relay 内存是否持续爬升。
+
+短 smoke 版本：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-soak.ps1 `
+  -Iterations 2 `
+  -BytesPerWorker 65536 `
+  -StressTimeoutSeconds 30
+```
+
 手动链路如下。
 
 本地 relay：
@@ -1039,6 +1062,7 @@ curl.exe -x socks5h://127.0.0.1:1080 -o NUL http://speedtest.tokyo2.linode.com/1
 
 - `go vet ./...` 通过。
 - `socks_stress` 多线程压测无数据错误。
+- `test-local-soak.ps1` 报告中 client/relay 内存、句柄和线程没有随迭代持续单调增长。
 - 100MB 下载测试能完整结束。
 - relay 日志无持续增长的 auth failure、bad record MAC 或 backend connect failed。
 

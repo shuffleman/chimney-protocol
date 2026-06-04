@@ -116,6 +116,7 @@
 - 自动化本地集成测试：relay + client + backend + SOCKS5 curl-like 流量。基础完成：`scripts/test-local-binaries.ps1`。
 - 自动化断线重连测试：kill relay、重启 relay、验证 client 新请求恢复。基础完成：`scripts/test-local-binaries.ps1 -ReconnectCheck`。
 - soak/stress 工具标准化输出 JSON。基础完成：`cmd/socks_stress -json`。
+- 本地真实二进制 soak：多轮 SOCKS5 混合流量并采样 relay/client 内存、句柄、线程。基础完成：`scripts/test-local-soak.ps1`。
 - 性能基线：吞吐、连接数、延迟、CPU、内存。
 - race 测试进入 CI 的 Linux job。
 
