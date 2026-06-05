@@ -63,6 +63,16 @@ func TestParseFingerprint_CaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestDefaultTLSNextProtosPrefersH2(t *testing.T) {
+	protos := defaultTLSNextProtos()
+	if len(protos) != 2 {
+		t.Fatalf("defaultTLSNextProtos length = %d, want 2", len(protos))
+	}
+	if protos[0] != "h2" || protos[1] != "http/1.1" {
+		t.Fatalf("defaultTLSNextProtos = %v, want [h2 http/1.1]", protos)
+	}
+}
+
 func TestStreamConnSatisfiesNetConn(t *testing.T) {
 	// 编译时检查：streamConn 实现了 net.Conn 接口
 	var _ net.Conn = (*streamConn)(nil)

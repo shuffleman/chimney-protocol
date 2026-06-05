@@ -256,6 +256,7 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 	tlsConfig := &utls.Config{
 		ServerName:         c.SNI,
 		InsecureSkipVerify: true,
+		NextProtos:         defaultTLSNextProtos(),
 	}
 
 	fpID := c.Fingerprints.Next()
@@ -267,6 +268,10 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 	if err := uConn.Handshake(); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("TLS handshake: %w", err)
+	}
+	if negotiated := uConn.ConnectionState().NegotiatedProtocol; negotiated != "h2" {
+		uConn.Close()
+		return nil, fmt.Errorf("TLS ALPN negotiated %q, want h2", negotiated)
 	}
 
 	// 第 3 步：提取握手状态
@@ -1021,4 +1026,8 @@ func (ts *tunnelStream) Close() error {
 			return nil
 		}
 	}
+}
+
+func defaultTLSNextProtos() []string {
+	return []string{"h2", "http/1.1"}
 }

@@ -3,12 +3,21 @@ package main
 import (
 	"io"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
 	cfgpkg "github.com/shuffleman/chimney-protocol/internal/config"
 	"github.com/shuffleman/chimney-protocol/internal/h2engine"
 )
+
+func TestDefaultTLSNextProtosPrefersH2(t *testing.T) {
+	got := defaultTLSNextProtos()
+	want := []string{"h2", "http/1.1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("defaultTLSNextProtos = %v, want %v", got, want)
+	}
+}
 
 func TestTunnelConnDeliverFrameWaitsForFullStreamChannel(t *testing.T) {
 	ch := make(chan *streamFrame, 1)

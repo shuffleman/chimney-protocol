@@ -988,6 +988,7 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 	tlsConfig := &utls.Config{
 		ServerName:         config.SNI,
 		InsecureSkipVerify: true,
+		NextProtos:         defaultTLSNextProtos(),
 	}
 
 	uConn := utls.UClient(rawConn, tlsConfig, fpID)
@@ -996,6 +997,10 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 	if err := uConn.Handshake(); err != nil {
 		rawConn.Close()
 		return nil, fmt.Errorf("chimney: TLS handshake: %w", err)
+	}
+	if negotiated := uConn.ConnectionState().NegotiatedProtocol; negotiated != "h2" {
+		uConn.Close()
+		return nil, fmt.Errorf("chimney: TLS ALPN negotiated %q, want h2", negotiated)
 	}
 
 	serverRandom := uConn.HandshakeState.ServerHello.Random
@@ -1587,6 +1592,10 @@ func parseFingerprint(name string) (utls.ClientHelloID, error) {
 		return utls.ClientHelloID{},
 			fmt.Errorf("unknown fingerprint %q (available: chrome, firefox, safari, ios, edge, android, 360, qq, randomized, golang)", name)
 	}
+}
+
+func defaultTLSNextProtos() []string {
+	return []string{"h2", "http/1.1"}
 }
 
 // 确保 streamConn 在编译时满足 net.Conn。
