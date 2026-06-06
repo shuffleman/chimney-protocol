@@ -127,14 +127,17 @@ func TestTunnelStreamReadReturnsWhenTunnelDies(t *testing.T) {
 
 func TestApplyClientConfigUsesConfigValues(t *testing.T) {
 	cfg := &cfgpkg.ClientConfig{
-		RelayAddr:       "relay.example.com:443",
-		SNI:             "cloudflare.com",
-		DestAddr:        "example.com:80",
-		PSK:             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		UserID:          "alice",
-		TagLen:          16,
-		ListenAddr:      "127.0.0.1:1081",
-		UTlsFingerprint: "firefox",
+		RelayAddr:         "relay.example.com:443",
+		SNI:               "cloudflare.com",
+		DestAddr:          "example.com:80",
+		PSK:               "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		UserID:            "alice",
+		TagLen:            16,
+		ListenAddr:        "127.0.0.1:1081",
+		UTlsFingerprint:   "firefox",
+		StealthMode:       true,
+		StealthRecordSize: 1024,
+		MaxTunnelLifetime: 20 * time.Second,
 	}
 	relayAddr := ""
 	sni := ""
@@ -144,8 +147,11 @@ func TestApplyClientConfigUsesConfigValues(t *testing.T) {
 	listenAddr := ""
 	fingerprint := ""
 	userID := ""
+	stealthMode := false
+	stealthRecord := 0
+	tunnelLifetime := time.Duration(0)
 
-	applyClientConfig(cfg, nil, &relayAddr, &sni, &destAddr, &pskHex, &tagLen, &listenAddr, &fingerprint, &userID)
+	applyClientConfig(cfg, nil, &relayAddr, &sni, &destAddr, &pskHex, &tagLen, &listenAddr, &fingerprint, &userID, &stealthMode, &stealthRecord, &tunnelLifetime)
 
 	if relayAddr != cfg.RelayAddr || sni != cfg.SNI || destAddr != cfg.DestAddr {
 		t.Fatalf("connection fields were not applied: relay=%q sni=%q dest=%q", relayAddr, sni, destAddr)
@@ -155,6 +161,9 @@ func TestApplyClientConfigUsesConfigValues(t *testing.T) {
 	}
 	if listenAddr != cfg.ListenAddr || fingerprint != cfg.UTlsFingerprint {
 		t.Fatalf("client fields were not applied: listen=%q fp=%q", listenAddr, fingerprint)
+	}
+	if !stealthMode || stealthRecord != cfg.StealthRecordSize || tunnelLifetime != cfg.MaxTunnelLifetime {
+		t.Fatalf("stealth fields were not applied: stealth=%v record=%d lifetime=%v", stealthMode, stealthRecord, tunnelLifetime)
 	}
 }
 
@@ -176,6 +185,9 @@ func TestApplyClientConfigKeepsExplicitFlags(t *testing.T) {
 	listenAddr := ""
 	fingerprint := "chrome"
 	userID := ""
+	stealthMode := false
+	stealthRecord := 0
+	tunnelLifetime := time.Duration(0)
 
 	applyClientConfig(
 		cfg,
@@ -188,6 +200,9 @@ func TestApplyClientConfigKeepsExplicitFlags(t *testing.T) {
 		&listenAddr,
 		&fingerprint,
 		&userID,
+		&stealthMode,
+		&stealthRecord,
+		&tunnelLifetime,
 	)
 
 	if relayAddr != "127.0.0.1:8444" {

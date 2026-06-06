@@ -428,6 +428,34 @@ handshake_timeout: 3s
 	}
 }
 
+func TestConfigNormalizeStealthDefaults(t *testing.T) {
+	cfg := Config{
+		RelayAddr:   "relay.example.com:443",
+		SNI:         "cloudflare.com",
+		UserID:      "550e8400-e29b-41d4-a716-446655440000",
+		StealthMode: true,
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize failed: %v", err)
+	}
+	if cfg.StealthRecordSize != DefaultStealthRecordSize {
+		t.Fatalf("StealthRecordSize = %d, want %d", cfg.StealthRecordSize, DefaultStealthRecordSize)
+	}
+	if cfg.MaxTunnelLifetime != DefaultStealthTunnelLifetime {
+		t.Fatalf("MaxTunnelLifetime = %v, want %v", cfg.MaxTunnelLifetime, DefaultStealthTunnelLifetime)
+	}
+}
+
+func TestTrafficShaperUsesStealthRecordSizeWithoutProfile(t *testing.T) {
+	shaper := newTrafficShaper(Config{
+		StealthMode:       true,
+		StealthRecordSize: 1024,
+	})
+	if got := shaper.targetSize(nil); got != 1024 {
+		t.Fatalf("targetSize = %d, want 1024", got)
+	}
+}
+
 func TestConfigNormalizeRejectsInvalidPSK(t *testing.T) {
 	cfg := Config{
 		RelayAddr: "relay.example.com:443",

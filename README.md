@@ -176,6 +176,9 @@ The client starts a SOCKS5 proxy on `127.0.0.1:1080`. Configure your application
 | `-profile` | (可选) | 流量 profile JSON（启用 padding） |
 | `-dilution` | (可选) | 预录制内容块 JSON（启用 dilution） |
 | `-padding-target` | `0` | 覆盖 padding 固定大小 |
+| `-stealth` | `false` | 启用内置流量塑形 |
+| `-stealth-record-size` | `0` | stealth 记录目标大小（0 = 896） |
+| `-max-tunnel-lifetime` | `0` | 单条 tunnel 软生命周期（stealth 默认 35s） |
 | `-listen` | `127.0.0.1:1080` | 本地 SOCKS5 监听地址 |
 | `-tag-len` | `16` | 认证标签长度 |
 
@@ -356,9 +359,12 @@ type Config struct {
     //       randomized, golang — 可追加版本号如 "chrome-120"
 
     // ── 流量塑造 / Traffic Shaping（可选）──
-    ProfilePath   string // 流量 profile JSON（padding 流）
-    PaddingTarget int    // 覆盖 padding 固定大小（0 = 使用 profile 分布）
-    DilutionPath  string // 预录制内容块 JSON（dilution 流）
+    ProfilePath       string        // 流量 profile JSON（padding 流）
+    PaddingTarget     int           // 覆盖 padding 固定大小（0 = 使用 profile 分布）
+    StealthMode       bool          // 启用内置 record padding + tunnel 轮换
+    StealthRecordSize int           // stealth 记录目标大小（0 = 896）
+    MaxTunnelLifetime time.Duration // 单条 tunnel 软生命周期（stealth 默认 35s）
+    DilutionPath      string        // 预录制内容块 JSON（dilution 流）
 
     // ── 超时 / Timeouts ──
     ConnectTimeout   time.Duration  // TCP 连接超时（默认 10s）

@@ -112,6 +112,15 @@ type ClientConfig struct {
 	// UTlsFingerprint 是要使用的 uTLS 指纹（例如 "chrome", "firefox", "safari"）。
 	UTlsFingerprint string `yaml:"utls_fingerprint,omitempty"`
 
+	// StealthMode 启用内置流量塑形。
+	StealthMode bool `yaml:"stealth_mode,omitempty"`
+
+	// StealthRecordSize 是 stealth 模式的记录目标大小。0 使用客户端默认值。
+	StealthRecordSize int `yaml:"stealth_record_size,omitempty"`
+
+	// MaxTunnelLifetime 是单条 tunnel 的软生命周期。0 表示不按年龄轮换。
+	MaxTunnelLifetime time.Duration `yaml:"max_tunnel_lifetime,omitempty"`
+
 	// ConnectTimeout 是中继连接的超时时间。
 	ConnectTimeout time.Duration `yaml:"connect_timeout"`
 

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net"
 	"os"
 	"strings"
@@ -50,6 +51,9 @@ const (
 	// maxTunnelDataChunk 为 Chimney 隧道命令前缀保留一个字节，
 	// 使每个 H2 DATA 帧携带自己的 0x02 DATA 命令。
 	maxTunnelDataChunk = 16*1024 - 1
+
+	defaultStealthRecordSize     = 896
+	defaultStealthTunnelLifetime = 35 * time.Second
 )
 
 func main() {
@@ -64,6 +68,9 @@ func main() {
 		fingerprintStr = flag.String("fingerprint", "chrome", "TLS fingerprint(s) to use (comma-separated for rotation)")
 		profileFile    = flag.String("profile", "", "Traffic profile JSON for padding (enables padding stream)")
 		paddingTarget  = flag.Int("padding-target", 0, "Override padding target size (0 = use profile distribution)")
+		stealthMode    = flag.Bool("stealth", false, "Enable built-in stealth traffic shaping")
+		stealthRecord  = flag.Int("stealth-record-size", 0, "Stealth record target size (0 = 896)")
+		tunnelLifetime = flag.Duration("max-tunnel-lifetime", 0, "Soft lifetime for each tunnel before reconnect (0 = disabled, stealth default = 35s)")
 		dilutionFile   = flag.String("dilution", "", "Pre-recorded content blocks JSON for dilution stream")
 		userID         = flag.String("user-id", "", "User identifier (UUID) for multi-user relay (default: \"default\")")
 	)
@@ -84,7 +91,15 @@ func main() {
 			logger.Error("failed to load client configuration", "path", *configPath, "error", err)
 			os.Exit(1)
 		}
-		applyClientConfig(cfg, explicitFlags, relayAddr, sni, destAddr, pskHex, tagLen, listenAddr, fingerprintStr, userID)
+		applyClientConfig(cfg, explicitFlags, relayAddr, sni, destAddr, pskHex, tagLen, listenAddr, fingerprintStr, userID, stealthMode, stealthRecord, tunnelLifetime)
+	}
+	if *stealthMode {
+		if *stealthRecord <= 0 {
+			*stealthRecord = defaultStealthRecordSize
+		}
+		if *tunnelLifetime == 0 {
+			*tunnelLifetime = defaultStealthTunnelLifetime
+		}
 	}
 
 	if *relayAddr == "" || *sni == "" || *destAddr == "" {
@@ -143,18 +158,21 @@ func main() {
 	}
 
 	client := &Client{
-		RelayAddr:        *relayAddr,
-		SNI:              *sni,
-		DestAddr:         *destAddr,
-		PSKHex:           psk,
-		UserID:           uid,
-		TagLen:           *tagLen,
-		ListenAddr:       *listenAddr,
-		Fingerprints:     fpRotator,
-		Profile:          trafficProfile,
-		PaddingTarget:    *paddingTarget,
-		DilutionProvider: dilutionProv,
-		Logger:           logger,
+		RelayAddr:         *relayAddr,
+		SNI:               *sni,
+		DestAddr:          *destAddr,
+		PSKHex:            psk,
+		UserID:            uid,
+		TagLen:            *tagLen,
+		ListenAddr:        *listenAddr,
+		Fingerprints:      fpRotator,
+		Profile:           trafficProfile,
+		PaddingTarget:     *paddingTarget,
+		StealthMode:       *stealthMode,
+		StealthRecordSize: *stealthRecord,
+		MaxTunnelLifetime: *tunnelLifetime,
+		DilutionProvider:  dilutionProv,
+		Logger:            logger,
 	}
 
 	if err := client.Run(); err != nil {
@@ -174,6 +192,9 @@ func applyClientConfig(
 	listenAddr *string,
 	fingerprintStr *string,
 	userID *string,
+	stealthMode *bool,
+	stealthRecord *int,
+	tunnelLifetime *time.Duration,
 ) {
 	if !explicitFlags["relay"] {
 		*relayAddr = cfg.RelayAddr
@@ -199,22 +220,84 @@ func applyClientConfig(
 	if !explicitFlags["user-id"] {
 		*userID = cfg.UserID
 	}
+	if !explicitFlags["stealth"] {
+		*stealthMode = cfg.StealthMode
+	}
+	if !explicitFlags["stealth-record-size"] {
+		*stealthRecord = cfg.StealthRecordSize
+	}
+	if !explicitFlags["max-tunnel-lifetime"] {
+		*tunnelLifetime = cfg.MaxTunnelLifetime
+	}
 }
 
 // Client 是 Chimney 客户端。
 type Client struct {
-	RelayAddr        string
-	SNI              string
-	DestAddr         string
-	PSKHex           string
-	UserID           string
-	TagLen           int
-	ListenAddr       string
-	Fingerprints     *FingerprintRotator
-	Profile          *profile.Model
-	PaddingTarget    int
-	DilutionProvider *dilution.Provider
-	Logger           *slog.Logger
+	RelayAddr         string
+	SNI               string
+	DestAddr          string
+	PSKHex            string
+	UserID            string
+	TagLen            int
+	ListenAddr        string
+	Fingerprints      *FingerprintRotator
+	Profile           *profile.Model
+	PaddingTarget     int
+	StealthMode       bool
+	StealthRecordSize int
+	MaxTunnelLifetime time.Duration
+	DilutionProvider  *dilution.Provider
+	Logger            *slog.Logger
+}
+
+type trafficShaper struct {
+	recordSize int
+}
+
+func newTrafficShaper(stealth bool, stealthRecordSize, paddingTarget int) trafficShaper {
+	if stealth {
+		size := stealthRecordSize
+		if size <= 0 {
+			size = defaultStealthRecordSize
+		}
+		return trafficShaper{recordSize: size}
+	}
+	if paddingTarget > 0 {
+		return trafficShaper{recordSize: paddingTarget}
+	}
+	return trafficShaper{}
+}
+
+func (s trafficShaper) targetSize(prof *profile.Model) uint16 {
+	size := s.recordSize
+	if size <= 0 && prof != nil {
+		size = int(prof.RecordSize())
+	}
+	if size <= 0 {
+		return 0
+	}
+	if size > 65535 {
+		size = 65535
+	}
+	return uint16(size)
+}
+
+func writeShapedData(e *h2engine.Engine, streamID uint32, data []byte, targetSize uint16, endStream bool) error {
+	if targetSize > 0 {
+		return e.WritePaddedRecord(streamID, data, targetSize, endStream)
+	}
+	return e.WriteData(streamID, data, endStream)
+}
+
+func jitterTunnelLifetime(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	span := base / 5
+	if span <= 0 {
+		return base
+	}
+	return base - span + time.Duration(rand.Int63n(int64(span*2)+1))
 }
 
 // Run 启动客户端。
@@ -414,7 +497,7 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 
 	c.Logger.Info("Chimney tunnel established")
 
-	return newTunnelConn(rawConn, h2Eng, recReader, recWriter, c.Profile, c.PaddingTarget, c.DilutionProvider), nil
+	return newTunnelConn(rawConn, h2Eng, recReader, recWriter, c.Profile, c.PaddingTarget, c.StealthMode, c.StealthRecordSize, c.MaxTunnelLifetime, c.DilutionProvider), nil
 }
 
 // completeH2Handshake 在交换后完成 H2 握手。
@@ -471,12 +554,16 @@ func (m *tunnelManager) getTunnel() (*tunnelConn, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.tunnel != nil && m.tunnel.isAlive() {
+	if m.tunnel != nil && m.tunnel.isAlive() && !m.tunnel.shouldRotate() {
 		return m.tunnel, nil
 	}
 
 	if m.tunnel != nil {
-		m.client.Logger.Info("tunnel is down, reconnecting", "error", m.tunnel.LastError())
+		if m.tunnel.shouldRotate() {
+			m.client.Logger.Info("tunnel lifetime reached, reconnecting")
+		} else {
+			m.client.Logger.Info("tunnel is down, reconnecting", "error", m.tunnel.LastError())
+		}
 		_ = m.tunnel.Close()
 	}
 
@@ -713,7 +800,10 @@ type tunnelConn struct {
 	recWriter     *record.RecordWriter
 	profile       *profile.Model
 	paddingTarget int
+	stealth       trafficShaper
 	dilution      *dilution.Provider
+	bornAt        time.Time
+	expiresAt     time.Time
 
 	mu      sync.Mutex
 	streams map[uint32]chan *streamFrame
@@ -726,7 +816,7 @@ type tunnelConn struct {
 }
 
 // newTunnelConn 创建 tunnelConn 并启动其帧分发器。
-func newTunnelConn(rawConn net.Conn, h2Eng *h2engine.Engine, recReader *record.RecordReader, recWriter *record.RecordWriter, prof *profile.Model, paddingTarget int, dilutionProv *dilution.Provider) *tunnelConn {
+func newTunnelConn(rawConn net.Conn, h2Eng *h2engine.Engine, recReader *record.RecordReader, recWriter *record.RecordWriter, prof *profile.Model, paddingTarget int, stealthMode bool, stealthRecordSize int, maxTunnelLifetime time.Duration, dilutionProv *dilution.Provider) *tunnelConn {
 	tc := &tunnelConn{
 		Conn:          rawConn,
 		h2Engine:      h2Eng,
@@ -734,10 +824,15 @@ func newTunnelConn(rawConn net.Conn, h2Eng *h2engine.Engine, recReader *record.R
 		recWriter:     recWriter,
 		profile:       prof,
 		paddingTarget: paddingTarget,
+		stealth:       newTrafficShaper(stealthMode, stealthRecordSize, paddingTarget),
 		dilution:      dilutionProv,
+		bornAt:        time.Now(),
 		streams:       make(map[uint32]chan *streamFrame),
 		quit:          make(chan struct{}),
 		dead:          make(chan struct{}),
+	}
+	if maxTunnelLifetime > 0 {
+		tc.expiresAt = tc.bornAt.Add(jitterTunnelLifetime(maxTunnelLifetime))
 	}
 	go tc.dispatchFrames()
 	if dilutionProv != nil && prof != nil {
@@ -753,6 +848,16 @@ func (tc *tunnelConn) isAlive() bool {
 	default:
 		return true
 	}
+}
+
+func (tc *tunnelConn) shouldRotate() bool {
+	if tc == nil || tc.expiresAt.IsZero() || time.Now().Before(tc.expiresAt) {
+		return false
+	}
+	tc.mu.Lock()
+	active := len(tc.streams)
+	tc.mu.Unlock()
+	return active == 0
 }
 
 func (tc *tunnelConn) LastError() error {
@@ -885,7 +990,7 @@ func (tc *tunnelConn) openStream(dest string) (*tunnelStream, error) {
 	connectCmd := make([]byte, 1+len(dest))
 	connectCmd[0] = 0x01
 	copy(connectCmd[1:], dest)
-	if err := tc.h2Engine.WriteData(streamID, connectCmd, false); err != nil {
+	if err := writeShapedData(tc.h2Engine, streamID, connectCmd, tc.stealth.targetSize(tc.profile), false); err != nil {
 		tc.mu.Lock()
 		delete(tc.streams, streamID)
 		tc.mu.Unlock()
@@ -980,14 +1085,7 @@ func (ts *tunnelStream) Read(p []byte) (int, error) {
 // 如果配置了流量配置文件，记录会被填充以匹配
 // 目标大小分布。
 func (ts *tunnelStream) Write(p []byte) (int, error) {
-	var targetSize uint16
-	if ts.tc.profile != nil {
-		if ts.tc.paddingTarget > 0 {
-			targetSize = uint16(ts.tc.paddingTarget)
-		} else {
-			targetSize = ts.tc.profile.RecordSize()
-		}
-	}
+	targetSize := ts.tc.stealth.targetSize(ts.tc.profile)
 
 	for offset := 0; offset < len(p); {
 		chunkSize := len(p) - offset
@@ -998,14 +1096,8 @@ func (ts *tunnelStream) Write(p []byte) (int, error) {
 		data[0] = 0x02
 		copy(data[1:], p[offset:offset+chunkSize])
 
-		if targetSize > 0 {
-			if err := ts.tc.h2Engine.WritePaddedRecord(ts.streamID, data, targetSize, false); err != nil {
-				return offset, err
-			}
-		} else {
-			if err := ts.tc.h2Engine.WriteData(ts.streamID, data, false); err != nil {
-				return offset, err
-			}
+		if err := writeShapedData(ts.tc.h2Engine, ts.streamID, data, targetSize, false); err != nil {
+			return offset, err
 		}
 		offset += chunkSize
 	}
@@ -1014,7 +1106,7 @@ func (ts *tunnelStream) Write(p []byte) (int, error) {
 
 // Close 发送 CLOSE 命令并注销流。
 func (ts *tunnelStream) Close() error {
-	ts.tc.h2Engine.WriteData(ts.streamID, []byte{0x03}, false)
+	_ = writeShapedData(ts.tc.h2Engine, ts.streamID, []byte{0x03}, ts.tc.stealth.targetSize(ts.tc.profile), false)
 	ts.tc.mu.Lock()
 	delete(ts.tc.streams, ts.streamID)
 	ts.tc.mu.Unlock()

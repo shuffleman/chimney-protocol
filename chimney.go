@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net"
 	"os"
 	"strconv"
@@ -60,6 +61,12 @@ const (
 
 	// DefaultTCPBufferSize 是每个隧道默认的 TCP 读写缓冲区大小。
 	DefaultTCPBufferSize = 256 * 1024
+
+	// DefaultStealthRecordSize 是 stealth 模式的默认 TLS application_data 明文目标大小。
+	DefaultStealthRecordSize = 896
+
+	// DefaultStealthTunnelLifetime 是 stealth 模式下单条 tunnel 的默认软生命周期。
+	DefaultStealthTunnelLifetime = 35 * time.Second
 )
 
 // Config 保存建立 Chimney 隧道的所有参数。
@@ -95,6 +102,17 @@ type Config struct {
 
 	// PaddingTarget 覆盖填充记录大小。0 表示使用配置文件分布。
 	PaddingTarget int `yaml:"padding_target,omitempty" json:"padding_target,omitempty"`
+
+	// StealthMode 启用内置流量塑形：默认记录大小 padding 与 tunnel 生命周期轮换。
+	// 它不依赖外部 profile，用于降低小 record 与长连接行为指纹。
+	StealthMode bool `yaml:"stealth_mode,omitempty" json:"stealth_mode,omitempty"`
+
+	// StealthRecordSize 是 StealthMode 的记录目标大小。0 使用 DefaultStealthRecordSize。
+	StealthRecordSize int `yaml:"stealth_record_size,omitempty" json:"stealth_record_size,omitempty"`
+
+	// MaxTunnelLifetime 是单条 tunnel 的软生命周期。0 表示不按年龄轮换；
+	// 开启 StealthMode 时默认为 DefaultStealthTunnelLifetime。
+	MaxTunnelLifetime time.Duration `yaml:"max_tunnel_lifetime,omitempty" json:"max_tunnel_lifetime,omitempty"`
 
 	// DilutionPath 是可选的用于稀释流的内容块 JSON。
 	// 空字符串表示禁用稀释。
@@ -171,6 +189,14 @@ func (c *Config) Normalize() error {
 	if c.TCPBufferSize <= 0 {
 		c.TCPBufferSize = DefaultTCPBufferSize
 	}
+	if c.StealthMode {
+		if c.StealthRecordSize <= 0 {
+			c.StealthRecordSize = DefaultStealthRecordSize
+		}
+		if c.MaxTunnelLifetime == 0 {
+			c.MaxTunnelLifetime = DefaultStealthTunnelLifetime
+		}
+	}
 
 	if c.RelayAddr == "" {
 		return fmt.Errorf("chimney: relay_addr is required")
@@ -193,6 +219,15 @@ func (c *Config) Normalize() error {
 	if c.TagLen < 8 || c.TagLen > 32 {
 		return fmt.Errorf("chimney: tag_len must be between 8 and 32")
 	}
+	if c.PaddingTarget < 0 {
+		return fmt.Errorf("chimney: padding_target must be >= 0")
+	}
+	if c.StealthRecordSize < 0 {
+		return fmt.Errorf("chimney: stealth_record_size must be >= 0")
+	}
+	if c.MaxTunnelLifetime < 0 {
+		return fmt.Errorf("chimney: max_tunnel_lifetime must be >= 0")
+	}
 	if _, err := parseFingerprint(c.Fingerprint); err != nil {
 		return fmt.Errorf("chimney: %w", err)
 	}
@@ -208,7 +243,10 @@ type tunnel struct {
 	recWriter *record.RecordWriter
 	prof      *profile.Model
 	padTarget int
+	stealth   trafficShaper
 	dilution  *dilution.Provider
+	bornAt    time.Time
+	expiresAt time.Time
 
 	mu        sync.Mutex
 	streams   map[uint32]chan *streamFrame
@@ -298,6 +336,56 @@ type streamConn struct {
 	readDeadline        time.Time
 	writeDeadline       time.Time
 	readDeadlineChanged chan struct{}
+}
+
+type trafficShaper struct {
+	recordSize int
+}
+
+func newTrafficShaper(config Config) trafficShaper {
+	if config.StealthMode {
+		size := config.StealthRecordSize
+		if size <= 0 {
+			size = DefaultStealthRecordSize
+		}
+		return trafficShaper{recordSize: size}
+	}
+	if config.PaddingTarget > 0 {
+		return trafficShaper{recordSize: config.PaddingTarget}
+	}
+	return trafficShaper{}
+}
+
+func (s trafficShaper) targetSize(prof *profile.Model) uint16 {
+	size := s.recordSize
+	if size <= 0 && prof != nil {
+		size = int(prof.RecordSize())
+	}
+	if size <= 0 {
+		return 0
+	}
+	if size > 65535 {
+		size = 65535
+	}
+	return uint16(size)
+}
+
+func writeShapedData(e *h2engine.Engine, streamID uint32, data []byte, targetSize uint16, endStream bool) error {
+	if targetSize > 0 {
+		return e.WritePaddedRecord(streamID, data, targetSize, endStream)
+	}
+	return e.WriteData(streamID, data, endStream)
+}
+
+func jitterTunnelLifetime(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	span := base / 5
+	if span <= 0 {
+		return base
+	}
+	return base - span + time.Duration(rand.Int63n(int64(span*2)+1))
 }
 
 func newStreamConn(t *tunnel, streamID uint32, ch chan *streamFrame, cmd byte) *streamConn {
@@ -406,14 +494,7 @@ func (c *streamConn) Write(p []byte) (int, error) {
 		cmd = cmdTCP
 	}
 
-	var targetSize uint16
-	if c.t.prof != nil {
-		if c.t.padTarget > 0 {
-			targetSize = uint16(c.t.padTarget)
-		} else {
-			targetSize = c.t.prof.RecordSize()
-		}
-	}
+	targetSize := c.t.stealth.targetSize(c.t.prof)
 
 	if cmd != cmdTCP {
 		if err := c.writeCommandFrame(cmd, p, targetSize); err != nil {
@@ -458,10 +539,7 @@ func (c *streamConn) writeCommandFrame(cmd byte, payload []byte, targetSize uint
 	data[0] = cmd
 	copy(data[1:], payload)
 
-	if targetSize > 0 {
-		return c.t.h2Eng.WritePaddedRecord(c.streamID, data, targetSize, false)
-	}
-	return c.t.h2Eng.WriteData(c.streamID, data, false)
+	return writeShapedData(c.t.h2Eng, c.streamID, data, targetSize, false)
 }
 
 func (c *streamConn) readDeadlineState() (time.Time, <-chan struct{}) {
@@ -549,7 +627,7 @@ func (c *streamConn) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
 		if c.t != nil && c.t.h2Eng != nil {
-			err = c.t.h2Eng.WriteData(c.streamID, []byte{cmdClose}, false)
+			err = writeShapedData(c.t.h2Eng, c.streamID, []byte{cmdClose}, c.t.stealth.targetSize(c.t.prof), false)
 		}
 		if c.t != nil {
 			c.t.mu.Lock()
@@ -1129,10 +1207,15 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 		recWriter: recWriter,
 		prof:      prof,
 		padTarget: config.PaddingTarget,
+		stealth:   newTrafficShaper(config),
 		dilution:  dil,
+		bornAt:    time.Now(),
 		streams:   make(map[uint32]chan *streamFrame),
 		quit:      make(chan struct{}),
 		dead:      make(chan struct{}),
+	}
+	if config.MaxTunnelLifetime > 0 {
+		t.expiresAt = t.bornAt.Add(jitterTunnelLifetime(config.MaxTunnelLifetime))
 	}
 
 	go t.dispatchFrames()
@@ -1199,7 +1282,9 @@ func (d *Dialer) ensureTunnel(idx uint32) (*tunnel, error) {
 	case <-t.dead:
 	// 隧道已死 — 尝试替换。
 	default:
-		return t, nil // 仍然存活
+		if !t.shouldRotate() {
+			return t, nil // 仍然存活
+		}
 	}
 
 	d.mu.Lock()
@@ -1210,6 +1295,9 @@ func (d *Dialer) ensureTunnel(idx uint32) (*tunnel, error) {
 	}
 
 	// 在锁下重新检查：另一个 goroutine 可能已经替换了它。
+	if d.pool[idx].shouldRotate() {
+		d.pool[idx].closeTunnel()
+	}
 	select {
 	case <-d.pool[idx].dead:
 	default:
@@ -1227,6 +1315,16 @@ func (d *Dialer) ensureTunnel(idx uint32) (*tunnel, error) {
 	d.pool[idx].closeTunnel()
 	d.pool[idx] = newT
 	return newT, nil
+}
+
+func (t *tunnel) shouldRotate() bool {
+	if t == nil || t.expiresAt.IsZero() || time.Now().Before(t.expiresAt) {
+		return false
+	}
+	t.mu.Lock()
+	active := len(t.streams)
+	t.mu.Unlock()
+	return active == 0
 }
 
 // DialContext 通过 Chimney 隧道打开一个新的 H2 流到目标地址。
@@ -1301,7 +1399,7 @@ func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error)
 	connectCmd := make([]byte, 1+len(addr))
 	connectCmd[0] = 0x01
 	copy(connectCmd[1:], addr)
-	if err := t.h2Eng.WriteData(streamID, connectCmd, false); err != nil {
+	if err := writeShapedData(t.h2Eng, streamID, connectCmd, t.stealth.targetSize(t.prof), false); err != nil {
 		t.mu.Lock()
 		delete(t.streams, streamID)
 		t.mu.Unlock()

@@ -91,6 +91,9 @@ tag_len: 16
 fingerprint: "chrome"
 pool_size: 4
 tcp_buffer_size: 262144
+stealth_mode: true
+stealth_record_size: 896
+max_tunnel_lifetime: 35s
 connect_timeout: 10s
 handshake_timeout: 10s
 ```
@@ -110,6 +113,7 @@ d, err := chimney.NewDialer(cfg)
 - 填充默认值。
 - 当 `PSK` 为空且 `UserID` 非空时派生 PSK。
 - 校验 `relay_addr`、`sni`、PSK、`tag_len`、fingerprint。
+- 开启 `StealthMode` 时填充默认 `StealthRecordSize=896` 和 `MaxTunnelLifetime=35s`。
 
 ## 4. 生命周期
 

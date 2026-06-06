@@ -31,6 +31,13 @@ listen_addr: "127.0.0.1:1080"
 # uTLS fingerprint to use (chrome, firefox, safari, edge)
 utls_fingerprint: "chrome"
 
+# Built-in traffic shaping for library/CLI clients.
+# This pads small tunnel writes toward browser-like TLS record sizes and
+# rotates idle tunnels before they become long-lived tunnel fingerprints.
+stealth_mode: true
+stealth_record_size: 896
+max_tunnel_lifetime: 35s
+
 # Connection timeout
 connect_timeout: 10s
 

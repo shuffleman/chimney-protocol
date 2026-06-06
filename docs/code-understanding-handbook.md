@@ -64,9 +64,10 @@ relay 在握手转发时捕获客户端第一个或前几个 `0x17` TLS applicat
 
 - uTLS fingerprint：让 ClientHello 形态接近真实浏览器。
 - H2 SETTINGS：内部 H2 设置尽量对齐真实站点 SETTINGS。
+- stealth mode：在没有外部 profile 时，也能把小 record padding 到浏览器常见大小附近，并在空闲时按软生命周期轮换 tunnel，降低“小包中位数”和“长连接”行为指纹。
 - profile / padding / dilution：控制记录大小、节奏、保留流上的填充和预录制内容。
 
-这些机制还没有全部达到生产级，但代码结构已经为它们留出了位置。
+这些机制还没有全部达到生产级，但代码结构已经为它们留出了位置。当前建议三方库接入默认开启 `StealthMode`，再按目标站点逐步补充校准 profile。
 
 ## 3. 仓库结构总览
 
@@ -151,7 +152,7 @@ CLI client 是一个本地 SOCKS5 代理：
 - 每个 SOCKS5 CONNECT 映射成一个 H2 stream。
 - tunnel 死亡时，在下一次 CONNECT 或 open stream 失败后重连。
 
-注意：`cmd/chimney-client` 当前只读 CLI flags，不读 `config/client.yaml.example`。
+注意：`cmd/chimney-client` 支持 `-config config/client.yaml`，并且 CLI flags 会覆盖 YAML 中的同名字段。
 
 ### 4.3 根包 `chimney.go`
 
