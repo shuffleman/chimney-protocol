@@ -500,6 +500,35 @@ func hexDecode(s string) ([]byte, error) {
 	return result, nil
 }
 
+// ExtractClientHelloRecord 从重组的客户端→服务器字节流中提取第一条 TLS
+// 握手记录的完整原始字节(含 5 字节记录头)。返回的字节可直接传给
+// uTLS Fingerprinter.FingerprintClientHello 以重建 ClientHelloSpec。
+//
+// 假定 ClientHello 位于单条 TLS 记录中(主流浏览器均如此)。
+func ExtractClientHelloRecord(clientStream []byte) ([]byte, error) {
+	if len(clientStream) < 5 {
+		return nil, errors.New("pcap: stream too short for TLS record header")
+	}
+	if clientStream[0] != 0x16 { // handshake
+		return nil, fmt.Errorf("pcap: first record is not handshake (content_type=0x%02x)", clientStream[0])
+	}
+	recLen := int(clientStream[3])<<8 | int(clientStream[4])
+	if recLen == 0 {
+		return nil, errors.New("pcap: empty handshake record")
+	}
+	total := 5 + recLen
+	if len(clientStream) < total {
+		return nil, fmt.Errorf("pcap: truncated handshake record (need %d bytes, have %d) — ClientHello may span multiple records", total, len(clientStream))
+	}
+	record := clientStream[:total]
+	if record[5] != 0x01 { // ClientHello
+		return nil, fmt.Errorf("pcap: first handshake message is not ClientHello (type=0x%02x)", record[5])
+	}
+	out := make([]byte, total)
+	copy(out, record)
+	return out, nil
+}
+
 // ExtractClientRandom 从重组的 ClientHello 字节中提取 ClientRandom。
 func ExtractClientRandom(clientHelloPayload []byte) ([]byte, error) {
 	hm, err := ParseHandshakeMessage(clientHelloPayload)

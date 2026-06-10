@@ -182,6 +182,24 @@ type Config struct {
 	// ConnectDenyPrivate 拒绝认证后的私有、回环、链路本地、多播和
 	// 未指定的 CONNECT 目标。
 	ConnectDenyPrivate bool
+
+	// StealthMode 启用下行流量塑形:对 relay→client 方向做记录 padding
+	// 并按需注入下行填充,使代理流量在记录大小、上下行字节比和满 MTU
+	// 占比上贴近真实 HTTPS 下载行为。关闭时下行按原始大小裸写。
+	StealthMode bool
+
+	// DownlinkLevel 是下行注水等级:off/low/medium/high/max。
+	// 等级越高,目标 down:up 比越大、注入越密,伪装越强但下行带宽开销越大。
+	// 空值在 StealthMode 下取 medium。off 仅做逐记录 padding、不注水。
+	DownlinkLevel string
+
+	// DownlinkRecordSize 是下行记录 padding 的固定目标明文大小(字节)。
+	// 0 表示按流量 profile 采样,产生更真实的尺寸分布(推荐)。
+	DownlinkRecordSize int
+
+	// DownlinkRatioTarget 显式覆盖注水等级的目标下行/上行字节比(down:up)。
+	// 0 表示采用 DownlinkLevel 的预设比值;负值关闭注水,仅做逐记录 padding。
+	DownlinkRatioTarget float64
 }
 
 // DefaultConfig 返回默认配置。
@@ -1432,6 +1450,14 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 		trafficProfile = profile.DefaultModel()
 	}
 
+	// 下行流量塑形(stealth):记录 padding + 按 profile 节奏的下行注水。
+	shaper := newDownlinkShaper(s.config, trafficProfile)
+	injectorDone := make(chan struct{})
+	defer close(injectorDone)
+	if shaper.enabled {
+		go shaper.runInjector(h2Eng, injectorDone)
+	}
+
 	for {
 		fh, payload, err := h2Eng.ReadFrame()
 		if err != nil {
@@ -1467,8 +1493,10 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 					logger.Debug("CLOSE stream", "stream_id", fh.StreamID)
 					pool.closeStream(fh.StreamID)
 				} else if cmd == 0x02 {
+					shaper.recordUp(len(cmdData))
 					pool.writeToStream(fh.StreamID, cmdData)
 				} else {
+					shaper.recordUp(len(payload))
 					pool.writeToStream(fh.StreamID, payload)
 				}
 				continue
@@ -1566,7 +1594,7 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 					writeCh := pool.registerWriteCh(sid)
 					go s.writeBackend(sid, backendConn, writeCh, logger, pool)
 					pool.flushPending(sid, writeCh)
-					s.readBackend(sid, backendConn, h2Eng, logger)
+					s.readBackend(sid, backendConn, h2Eng, shaper, logger)
 				}(fh.StreamID, dest)
 			}
 
@@ -1588,7 +1616,8 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 }
 
 // readBackend 从后端连接读取数据，并以 H2 DATA 帧的形式发送回数据。
-func (s *Server) readBackend(streamID uint32, backendConn net.Conn, h2Eng *h2engine.Engine, logger *slog.Logger) {
+// shaper 对下行记录做 padding 并记账下行字节(stealth 模式);未启用时为空操作。
+func (s *Server) readBackend(streamID uint32, backendConn net.Conn, h2Eng *h2engine.Engine, shaper *downlinkShaper, logger *slog.Logger) {
 	buf := make([]byte, 64*1024)
 	for {
 		n, err := backendConn.Read(buf)
@@ -1602,7 +1631,7 @@ func (s *Server) readBackend(streamID uint32, backendConn net.Conn, h2Eng *h2eng
 				response[0] = 0x02
 				copy(response[1:], buf[offset:offset+chunkSize])
 
-				if werr := h2Eng.WriteData(streamID, response, false); werr != nil {
+				if werr := shaper.writeResponse(h2Eng, streamID, response); werr != nil {
 					logger.Debug("backend response write failed", "error", werr, "stream_id", streamID)
 					return
 				}

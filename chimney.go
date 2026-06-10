@@ -91,10 +91,20 @@ type Config struct {
 	// TagLen 是认证标签长度（字节）（默认：16）。
 	TagLen int `yaml:"tag_len,omitempty" json:"tag_len,omitempty"`
 
-	// Fingerprint 是 uTLS ClientHello 指纹名称（默认："chrome"）。
+	// Fingerprint 是 uTLS ClientHello 指纹规格（默认："chrome"）。
 	// 可用选项：chrome, firefox, safari, ios, edge, android, 360, qq,
 	// randomized, golang — 可附加版本号（例如 "chrome-120"）。
+	//
+	// 支持轮换以分散 JA3 指纹(通用反检测,无需站点抓包)：
+	//   - 逗号分隔列表，如 "chrome,firefox,edge" — 每条隧道随机选一个；
+	//   - 关键字 "rotate" 或 "auto" — 展开为默认真实浏览器池并轮换。
 	Fingerprint string `yaml:"fingerprint,omitempty" json:"fingerprint,omitempty"`
+
+	// ClientHelloFile 是精确指纹校准文件路径(由 cmd/calibrate 从 pcap 提取的
+	// 真实 ClientHello 原始字节,hex 编码)。设置后优先于 Fingerprint:每条连接
+	// 用 uTLS HelloCustom + ApplyPreset 复刻这条真实 ClientHello,使扩展数量/
+	// 顺序、ALPN、JA3 与真实浏览器完全一致(而非通用预设的逼近)。
+	ClientHelloFile string `yaml:"client_hello_file,omitempty" json:"client_hello_file,omitempty"`
 
 	// ProfilePath 是可选的用于填充的流量配置文件 JSON。
 	// 空字符串表示禁用填充。
@@ -228,7 +238,16 @@ func (c *Config) Normalize() error {
 	if c.MaxTunnelLifetime < 0 {
 		return fmt.Errorf("chimney: max_tunnel_lifetime must be >= 0")
 	}
-	if _, err := parseFingerprint(c.Fingerprint); err != nil {
+	if c.ClientHelloFile != "" {
+		// 精确校准:文件须可读且能重建出有效 spec(尽早暴露错误)。
+		raw, err := loadClientHelloRaw(c.ClientHelloFile)
+		if err != nil {
+			return err
+		}
+		if _, err := buildClientHelloSpec(raw); err != nil {
+			return err
+		}
+	} else if err := validateFingerprintSpec(c.Fingerprint); err != nil {
 		return fmt.Errorf("chimney: %w", err)
 	}
 	return nil
@@ -1057,19 +1076,41 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 	}
 
 	// 步骤 2：uTLS 握手
-	fpID, err := parseFingerprint(config.Fingerprint)
-	if err != nil {
-		rawConn.Close()
-		return nil, fmt.Errorf("chimney: %w", err)
-	}
-
 	tlsConfig := &utls.Config{
 		ServerName:         config.SNI,
 		InsecureSkipVerify: true,
 		NextProtos:         defaultTLSNextProtos(),
 	}
 
-	uConn := utls.UClient(rawConn, tlsConfig, fpID)
+	var uConn *utls.UConn
+	if config.ClientHelloFile != "" {
+		// 精确校准:每条连接从原始字节重建独立 spec,HelloCustom + ApplyPreset
+		// 复刻真实 ClientHello。SNI 由 config.ServerName(=config.SNI)填充,
+		// 不会回放捕获时的 SNI。
+		raw, lerr := loadClientHelloRaw(config.ClientHelloFile)
+		if lerr != nil {
+			rawConn.Close()
+			return nil, lerr
+		}
+		spec, serr := buildClientHelloSpec(raw)
+		if serr != nil {
+			rawConn.Close()
+			return nil, serr
+		}
+		uConn = utls.UClient(rawConn, tlsConfig, utls.HelloCustom)
+		if aerr := uConn.ApplyPreset(spec); aerr != nil {
+			rawConn.Close()
+			return nil, fmt.Errorf("chimney: apply client hello spec: %w", aerr)
+		}
+	} else {
+		// 从指纹规格中选取(列表/rotate 关键字时随机轮换),逐隧道分散 JA3。
+		fpID, ferr := selectFingerprint(config.Fingerprint)
+		if ferr != nil {
+			rawConn.Close()
+			return nil, fmt.Errorf("chimney: %w", ferr)
+		}
+		uConn = utls.UClient(rawConn, tlsConfig, fpID)
+	}
 	uConn.SetSNI(config.SNI)
 
 	if err := uConn.Handshake(); err != nil {
@@ -1579,6 +1620,59 @@ func (t *tunnel) dilutionLoop() {
 	}
 }
 
+// fingerprintRotatePool 是关键字 "rotate"/"auto" 展开的默认真实浏览器指纹池。
+// 通用方案:不依赖站点抓包,通过在多个真实浏览器指纹间轮换,使 JA3 从单一
+// 固定值变为跨浏览器的分布,瓦解基于固定 JA3 / 扩展数量的分类器。
+var fingerprintRotatePool = []string{"chrome", "firefox", "edge", "safari", "ios"}
+
+// expandFingerprintSpec 把指纹规格串解析为名称列表。
+// 支持:单个名称、逗号分隔列表,以及关键字 "rotate"/"auto"(展开为默认池)。
+// 空串回退到 "chrome"。
+func expandFingerprintSpec(spec string) []string {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return []string{"chrome"}
+	}
+	switch strings.ToLower(spec) {
+	case "rotate", "auto":
+		pool := make([]string, len(fingerprintRotatePool))
+		copy(pool, fingerprintRotatePool)
+		return pool
+	}
+	parts := strings.Split(spec, ",")
+	names := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			names = append(names, p)
+		}
+	}
+	if len(names) == 0 {
+		return []string{"chrome"}
+	}
+	return names
+}
+
+// validateFingerprintSpec 校验规格串中每个指纹名都有效。
+func validateFingerprintSpec(spec string) error {
+	for _, name := range expandFingerprintSpec(spec) {
+		if _, err := parseFingerprint(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// selectFingerprint 从规格串中选取一个指纹 ClientHelloID。
+// 列表含多项时随机挑选——每次新建隧道独立调用,从而在连接维度上轮换 JA3。
+func selectFingerprint(spec string) (utls.ClientHelloID, error) {
+	names := expandFingerprintSpec(spec)
+	name := names[0]
+	if len(names) > 1 {
+		name = names[rand.Intn(len(names))]
+	}
+	return parseFingerprint(name)
+}
+
 // parseFingerprint 将名称字符串映射到 uTLS ClientHelloID。
 func parseFingerprint(name string) (utls.ClientHelloID, error) {
 	normalized := strings.ToLower(name)
@@ -1757,6 +1851,21 @@ type RelayConfig struct {
 
 	// BackendDialer 是可选的用于后端连接的自定义拨号器。
 	BackendDialer func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	// StealthMode 启用下行流量塑形(记录 padding + 下行注水),使代理流量在
+	// 记录大小、上下行字节比和满 MTU 占比上贴近真实 HTTPS 下载。
+	StealthMode bool
+
+	// DownlinkLevel 是下行注水等级:off/low/medium/high/max。
+	// 空值在 StealthMode 下取 medium;off 仅做记录 padding、不注水。
+	DownlinkLevel string
+
+	// DownlinkRecordSize 是下行记录 padding 的固定目标大小(字节)。
+	// 0 表示按流量 profile 采样(推荐)。
+	DownlinkRecordSize int
+
+	// DownlinkRatioTarget 显式覆盖等级的下行/上行字节比;负值关闭注水。
+	DownlinkRatioTarget float64
 }
 
 // RelayServer 封装中继服务器供公共使用。
@@ -1784,6 +1893,11 @@ func NewRelayServer(config *RelayConfig, logger *slog.Logger) (*RelayServer, err
 		EnableProfiling:  config.EnableProfiling,
 		ProfileDir:       config.ProfileDir,
 		BackendDialer:    config.BackendDialer,
+
+		StealthMode:         config.StealthMode,
+		DownlinkLevel:       config.DownlinkLevel,
+		DownlinkRecordSize:  config.DownlinkRecordSize,
+		DownlinkRatioTarget: config.DownlinkRatioTarget,
 	}
 	srv, err := relay.NewServer(cfg, logger)
 	if err != nil {

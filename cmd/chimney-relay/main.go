@@ -82,6 +82,11 @@ func main() {
 		ConnectAllowCIDRs:  cfg.ConnectAllowCIDRs,
 		ConnectDenyCIDRs:   cfg.ConnectDenyCIDRs,
 		ConnectDenyPrivate: cfg.ConnectDenyPrivate,
+
+		StealthMode:         cfg.StealthMode,
+		DownlinkLevel:       cfg.DownlinkLevel,
+		DownlinkRecordSize:  cfg.DownlinkRecordSize,
+		DownlinkRatioTarget: cfg.DownlinkRatioTarget,
 	}
 
 	// 创建并启动中继服务器

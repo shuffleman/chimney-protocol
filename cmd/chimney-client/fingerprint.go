@@ -9,12 +9,42 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
 	utls "github.com/refraction-networking/utls"
 )
+
+// loadClientHelloRaw 读取精确指纹文件(hex 编码的完整 TLS ClientHello 记录),
+// 返回原始字节。忽略空白与换行。
+func loadClientHelloRaw(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read client_hello_file: %w", err)
+	}
+	raw, err := hex.DecodeString(strings.Join(strings.Fields(string(data)), ""))
+	if err != nil {
+		return nil, fmt.Errorf("client_hello_file must be hex: %w", err)
+	}
+	if len(raw) < 6 || raw[0] != 0x16 || raw[5] != 0x01 {
+		return nil, fmt.Errorf("client_hello_file is not a TLS ClientHello handshake record")
+	}
+	return raw, nil
+}
+
+// buildClientHelloSpec 从原始字节重建独立的 uTLS ClientHelloSpec(每连接调用一次,
+// 避免跨连接共享扩展状态)。
+func buildClientHelloSpec(raw []byte) (*utls.ClientHelloSpec, error) {
+	fp := &utls.Fingerprinter{AllowBluntMimicry: true}
+	spec, err := fp.FingerprintClientHello(raw)
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint client hello: %w", err)
+	}
+	return spec, nil
+}
 
 // FingerprintRotator 循环遍历 uTLS ClientHelloID 列表。
 // 可在多个连接间安全并发使用。

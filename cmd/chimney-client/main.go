@@ -58,21 +58,22 @@ const (
 
 func main() {
 	var (
-		configPath     = flag.String("config", "", "Path to client configuration file")
-		relayAddr      = flag.String("relay", "", "Relay address (host:port)")
-		sni            = flag.String("sni", "", "SNI to use (whitelisted site)")
-		destAddr       = flag.String("dest", "", "Final destination (host:port)")
-		pskHex         = flag.String("psk", "", "Pre-shared key (hex-encoded)")
-		tagLen         = flag.Int("tag-len", auth.DefaultTagLen, "Auth tag length")
-		listenAddr     = flag.String("listen", "127.0.0.1:1080", "Local SOCKS5 listen address")
-		fingerprintStr = flag.String("fingerprint", "chrome", "TLS fingerprint(s) to use (comma-separated for rotation)")
-		profileFile    = flag.String("profile", "", "Traffic profile JSON for padding (enables padding stream)")
-		paddingTarget  = flag.Int("padding-target", 0, "Override padding target size (0 = use profile distribution)")
-		stealthMode    = flag.Bool("stealth", false, "Enable built-in stealth traffic shaping")
-		stealthRecord  = flag.Int("stealth-record-size", 0, "Stealth record target size (0 = 896)")
-		tunnelLifetime = flag.Duration("max-tunnel-lifetime", 0, "Soft lifetime for each tunnel before reconnect (0 = disabled, stealth default = 35s)")
-		dilutionFile   = flag.String("dilution", "", "Pre-recorded content blocks JSON for dilution stream")
-		userID         = flag.String("user-id", "", "User identifier (UUID) for multi-user relay (default: \"default\")")
+		configPath      = flag.String("config", "", "Path to client configuration file")
+		relayAddr       = flag.String("relay", "", "Relay address (host:port)")
+		sni             = flag.String("sni", "", "SNI to use (whitelisted site)")
+		destAddr        = flag.String("dest", "", "Final destination (host:port)")
+		pskHex          = flag.String("psk", "", "Pre-shared key (hex-encoded)")
+		tagLen          = flag.Int("tag-len", auth.DefaultTagLen, "Auth tag length")
+		listenAddr      = flag.String("listen", "127.0.0.1:1080", "Local SOCKS5 listen address")
+		fingerprintStr  = flag.String("fingerprint", "chrome", "TLS fingerprint(s) to use (comma-separated for rotation)")
+		profileFile     = flag.String("profile", "", "Traffic profile JSON for padding (enables padding stream)")
+		paddingTarget   = flag.Int("padding-target", 0, "Override padding target size (0 = use profile distribution)")
+		stealthMode     = flag.Bool("stealth", false, "Enable built-in stealth traffic shaping")
+		stealthRecord   = flag.Int("stealth-record-size", 0, "Stealth record target size (0 = 896)")
+		tunnelLifetime  = flag.Duration("max-tunnel-lifetime", 0, "Soft lifetime for each tunnel before reconnect (0 = disabled, stealth default = 35s)")
+		dilutionFile    = flag.String("dilution", "", "Pre-recorded content blocks JSON for dilution stream")
+		userID          = flag.String("user-id", "", "User identifier (UUID) for multi-user relay (default: \"default\")")
+		clientHelloFile = flag.String("client-hello-file", "", "Precise ClientHello fingerprint file from cmd/calibrate (overrides -fingerprint)")
 	)
 	flag.Parse()
 
@@ -92,6 +93,9 @@ func main() {
 			os.Exit(1)
 		}
 		applyClientConfig(cfg, explicitFlags, relayAddr, sni, destAddr, pskHex, tagLen, listenAddr, fingerprintStr, userID, stealthMode, stealthRecord, tunnelLifetime)
+		if !explicitFlags["client-hello-file"] && cfg.ClientHelloFile != "" {
+			*clientHelloFile = cfg.ClientHelloFile
+		}
 	}
 	if *stealthMode {
 		if *stealthRecord <= 0 {
@@ -116,6 +120,21 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("fingerprint rotation configured", "fingerprints", FingerprintNames(fpRotator))
+
+	// 精确指纹(可选):加载并校验真实 ClientHello,设置后优先于轮换预设。
+	var clientHelloRaw []byte
+	if *clientHelloFile != "" {
+		clientHelloRaw, err = loadClientHelloRaw(*clientHelloFile)
+		if err != nil {
+			logger.Error("failed to load client-hello-file", "error", err)
+			os.Exit(1)
+		}
+		if _, verr := buildClientHelloSpec(clientHelloRaw); verr != nil {
+			logger.Error("client-hello-file cannot be rebuilt by uTLS", "error", verr)
+			os.Exit(1)
+		}
+		logger.Info("precise ClientHello fingerprint loaded", "file", *clientHelloFile, "bytes", len(clientHelloRaw))
+	}
 
 	// 加载流量配置文件以进行填充（可选）
 	var trafficProfile *profile.Model
@@ -166,6 +185,7 @@ func main() {
 		TagLen:            *tagLen,
 		ListenAddr:        *listenAddr,
 		Fingerprints:      fpRotator,
+		ClientHelloRaw:    clientHelloRaw,
 		Profile:           trafficProfile,
 		PaddingTarget:     *paddingTarget,
 		StealthMode:       *stealthMode,
@@ -241,6 +261,7 @@ type Client struct {
 	TagLen            int
 	ListenAddr        string
 	Fingerprints      *FingerprintRotator
+	ClientHelloRaw    []byte // 非空时:精确指纹,每连接重建 spec 并 HelloCustom+ApplyPreset
 	Profile           *profile.Model
 	PaddingTarget     int
 	StealthMode       bool
@@ -342,10 +363,25 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 		NextProtos:         defaultTLSNextProtos(),
 	}
 
-	fpID := c.Fingerprints.Next()
-	c.Logger.Debug("using TLS fingerprint", "client", fpID.Client, "version", fpID.Version)
-
-	uConn := utls.UClient(conn, tlsConfig, fpID)
+	var uConn *utls.UConn
+	if len(c.ClientHelloRaw) > 0 {
+		// 精确指纹:每连接重建独立 spec,复刻真实 ClientHello。
+		spec, serr := buildClientHelloSpec(c.ClientHelloRaw)
+		if serr != nil {
+			conn.Close()
+			return nil, serr
+		}
+		uConn = utls.UClient(conn, tlsConfig, utls.HelloCustom)
+		if aerr := uConn.ApplyPreset(spec); aerr != nil {
+			conn.Close()
+			return nil, fmt.Errorf("apply client hello spec: %w", aerr)
+		}
+		c.Logger.Debug("using precise ClientHello fingerprint")
+	} else {
+		fpID := c.Fingerprints.Next()
+		c.Logger.Debug("using TLS fingerprint", "client", fpID.Client, "version", fpID.Version)
+		uConn = utls.UClient(conn, tlsConfig, fpID)
+	}
 	uConn.SetSNI(c.SNI)
 
 	if err := uConn.Handshake(); err != nil {

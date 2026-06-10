@@ -17,6 +17,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"sort"
 	"time"
 
+	utls "github.com/refraction-networking/utls"
 	"github.com/shuffleman/chimney-protocol/internal/h2engine"
 	"github.com/shuffleman/chimney-protocol/internal/pcap"
 	"github.com/shuffleman/chimney-protocol/internal/profile"
@@ -92,10 +94,24 @@ func main() {
 	}
 	fmt.Printf("Profile saved to: %s\n", profilePath)
 
+	fmt.Println("\n=== Phase 3: Extracting ClientHello Fingerprint ===")
+	clientHelloPath := filepath.Join(*outputDir, *siteName+".clienthello")
+	if err := extractAndSaveClientHello(*pcapFile, uint16(*serverPort), clientHelloPath); err != nil {
+		fmt.Printf("Warning: Could not extract ClientHello fingerprint: %v\n", err)
+		fmt.Println("Precise fingerprint unavailable; client falls back to preset/rotation.")
+		clientHelloPath = ""
+	} else {
+		fmt.Printf("ClientHello fingerprint saved to: %s\n", clientHelloPath)
+	}
+
 	fmt.Println("\n=== Calibration Complete ===")
 	fmt.Printf("Site: %s\n", *siteName)
 	fmt.Printf("SETTINGS: %s\n", settingsPath)
 	fmt.Printf("Profile:  %s\n", profilePath)
+	if clientHelloPath != "" {
+		fmt.Printf("ClientHello: %s\n", clientHelloPath)
+		fmt.Printf("\nClient config — use the precise fingerprint:\n  client_hello_file: %q\n", clientHelloPath)
+	}
 	fmt.Println("\nAdd to intent.yaml:")
 	fmt.Printf(`  %s:
     sni: %s
@@ -669,4 +685,35 @@ func saveSettings(settings *h2engine.Settings, path string) error {
 	}
 
 	return os.WriteFile(path, jsonData, 0644)
+}
+
+// extractAndSaveClientHello 从 pcap 提取真实 ClientHello 原始记录,校验可用
+// uTLS 重建 ClientHelloSpec,并以 hex 保存,供客户端 client_hello_file 精确复刻。
+func extractAndSaveClientHello(pcapFile string, serverPort uint16, outPath string) error {
+	fs, err := pcap.ReassembleStreams(pcapFile, serverPort)
+	if err != nil {
+		return err
+	}
+	raw, err := pcap.ExtractClientHelloRecord(fs.ClientToServer)
+	if err != nil {
+		return err
+	}
+
+	// 校验:运行时客户端能否从这条记录重建 spec。
+	fp := &utls.Fingerprinter{AllowBluntMimicry: true}
+	spec, err := fp.FingerprintClientHello(raw)
+	if err != nil {
+		return fmt.Errorf("uTLS cannot rebuild spec from captured hello: %w", err)
+	}
+
+	alpn := 0
+	for _, ext := range spec.Extensions {
+		if a, ok := ext.(*utls.ALPNExtension); ok {
+			alpn = len(a.AlpnProtocols)
+		}
+	}
+	fmt.Printf("  cipher_suites=%d extensions=%d alpn_protocols=%d record_bytes=%d\n",
+		len(spec.CipherSuites), len(spec.Extensions), alpn, len(raw))
+
+	return os.WriteFile(outPath, []byte(hex.EncodeToString(raw)+"\n"), 0644)
 }

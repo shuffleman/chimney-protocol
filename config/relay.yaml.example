@@ -59,6 +59,25 @@ enable_profiling: true
 # Note: current relay code does not load per-site profiles from this directory yet.
 profile_dir: "profiles"
 
+# ── Downlink traffic shaping (stealth) ──
+# 对 relay→client 方向做记录 padding + 下行注水,使代理流量在记录大小、
+# 上下行字节比和满 MTU 占比上贴近真实 HTTPS 下载行为。
+# 默认关闭;关闭时下行按原始大小裸写(会暴露小记录与上下行对称)。
+stealth_mode: true
+
+# 下行注水等级:off / low / medium / high / max。
+# 等级越高,目标 down:up 比越大、注入越密,伪装越强但下行带宽开销越大:
+#   off=仅记录 padding 不注水, low≈2.5, medium≈5, high≈8, max≈12。
+# 空值在 stealth_mode 下取 medium。
+downlink_level: "medium"
+
+# 下行记录 padding 的固定目标明文大小(字节)。
+# 0 表示按流量 profile 采样,产生更真实的尺寸分布(推荐)。
+downlink_record_size: 0
+
+# 显式覆盖等级的下行/上行字节比(down:up)。0 取等级预设;负值关闭注水。
+downlink_ratio_target: 0
+
 # CIDR refresh interval from cloud providers
 cidr_refresh_interval: 24h
 

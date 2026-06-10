@@ -82,6 +82,22 @@ type RelayConfig struct {
 	// ConnectDenyPrivate 在认证后拒绝私有、loopback、链路本地、
 	// 多播和未指定 CONNECT 目标。
 	ConnectDenyPrivate bool `yaml:"connect_deny_private,omitempty"`
+
+	// StealthMode 启用下行流量塑形(记录 padding + 下行注水),
+	// 使代理流量在记录大小与上下行比例上贴近真实 HTTPS 下载。
+	StealthMode bool `yaml:"stealth_mode,omitempty"`
+
+	// DownlinkLevel 是下行注水等级:off/low/medium/high/max。
+	// 空值在 StealthMode 下取 medium;off 仅做记录 padding、不注水。
+	DownlinkLevel string `yaml:"downlink_level,omitempty"`
+
+	// DownlinkRecordSize 是下行记录 padding 的固定目标大小(字节)。
+	// 0 表示按流量 profile 采样(推荐)。
+	DownlinkRecordSize int `yaml:"downlink_record_size,omitempty"`
+
+	// DownlinkRatioTarget 显式覆盖等级的下行/上行字节比(down:up)。
+	// 0 取等级预设;负值关闭注水。
+	DownlinkRatioTarget float64 `yaml:"downlink_ratio_target,omitempty"`
 }
 
 // ClientConfig 是客户端的配置。
@@ -111,6 +127,11 @@ type ClientConfig struct {
 
 	// UTlsFingerprint 是要使用的 uTLS 指纹（例如 "chrome", "firefox", "safari"）。
 	UTlsFingerprint string `yaml:"utls_fingerprint,omitempty"`
+
+	// ClientHelloFile 是精确指纹校准文件路径(cmd/calibrate 从 pcap 提取的真实
+	// ClientHello 原始字节,hex)。设置后优先于 UTlsFingerprint,握手用
+	// HelloCustom + ApplyPreset 复刻真实 ClientHello。
+	ClientHelloFile string `yaml:"client_hello_file,omitempty"`
 
 	// StealthMode 启用内置流量塑形。
 	StealthMode bool `yaml:"stealth_mode,omitempty"`

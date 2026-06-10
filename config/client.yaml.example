@@ -28,8 +28,15 @@ tag_len: 16
 # Local SOCKS5 proxy listen address
 listen_addr: "127.0.0.1:1080"
 
-# uTLS fingerprint to use (chrome, firefox, safari, edge)
+# uTLS fingerprint to use (chrome, firefox, safari, edge).
+# 支持逗号列表轮换(chrome,firefox,edge)与关键字 "rotate"/"auto"。
 utls_fingerprint: "chrome"
+
+# 精确指纹校准(可选,优先于 utls_fingerprint):
+# 由 cmd/calibrate 从真实浏览器访问目标站点的 pcap 提取的 ClientHello
+# (生成 <site>.clienthello)。设置后握手会逐字复刻这条真实 ClientHello,
+# 使扩展数量/顺序、ALPN、JA3 与真实浏览器完全一致。
+# client_hello_file: "profiles/cloudflare.com.clienthello"
 
 # Built-in traffic shaping for library/CLI clients.
 # This pads small tunnel writes toward browser-like TLS record sizes and
