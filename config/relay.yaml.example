@@ -52,8 +52,10 @@ handshake_timeout: 10s
 # Auth record read timeout
 auth_read_timeout: 5s
 
-# Enable traffic profiling and pacing
-enable_profiling: true
+# 上行逐帧 pacing。注意:开启会对每个上行帧 sleep 一个节奏延迟,显著拖慢上传
+# (实测约腰斩)。下行伪装由 stealth_mode 独立提供(v0.3.3 起已与本开关解耦),
+# 故追求上传吞吐时建议设为 false;仅在需要上行时序整形时才开。
+enable_profiling: false
 
 # Directory containing site profile files.
 # Note: current relay code does not load per-site profiles from this directory yet.
