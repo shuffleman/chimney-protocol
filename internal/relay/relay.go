@@ -1433,6 +1433,14 @@ func (ub *udpBackend) close() {
 	ub.conn.Close()
 }
 
+// wantsTrafficProfile 返回是否需要构建流量 profile。
+// 下行塑形(StealthMode)需要它做记录大小/节奏采样;上行逐帧 pacing
+// (EnableProfiling)也需要它。任一开启即构建,从而解耦二者:关掉
+// EnableProfiling 提升上传时,StealthMode 的下行记录伪装仍有 profile 可用。
+func wantsTrafficProfile(cfg *Config) bool {
+	return cfg.EnableProfiling || cfg.StealthMode
+}
+
 // handleTunnel 在调包后处理 H2 隧道，带流量画像调速。
 func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error {
 	pool := newTunnelConnPool(s.config.BackendDialer, s.dialSem, s.connSem, s.connectACL)
@@ -1445,8 +1453,13 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 		}
 	}()
 
+	// trafficProfile 供两处使用,但解耦控制:
+	//   - 下行塑形器:StealthMode 下始终需要 profile 来采样真实记录大小/节奏;
+	//   - 上行逐帧 pacing:仅 EnableProfiling 时启用(它会拖慢上传)。
+	// 因此只要 EnableProfiling 或 StealthMode 任一开启就构建 profile,
+	// 这样关掉 EnableProfiling 提升上传的同时,下行记录伪装不受影响。
 	var trafficProfile *profile.Model
-	if s.config.EnableProfiling {
+	if wantsTrafficProfile(s.config) {
 		trafficProfile = profile.DefaultModel()
 	}
 
@@ -1608,7 +1621,10 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 			return nil
 		}
 
-		if trafficProfile != nil {
+		// 上行逐帧 pacing:仅在 EnableProfiling 时启用。它对每个上行帧 sleep
+		// 一个 profile 节奏延迟,会显著拖慢上传;StealthMode 单独保留下行伪装,
+		// 故默认建议 EnableProfiling=false 以获得更快上传。
+		if s.config.EnableProfiling && trafficProfile != nil {
 			delay := trafficProfile.RecordDelay()
 			time.Sleep(delay)
 		}
