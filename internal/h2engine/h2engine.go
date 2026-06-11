@@ -269,6 +269,22 @@ func DataFrame(streamID uint32, flags uint8, payload []byte) []byte {
 	return frame
 }
 
+// PingFrame 编码一个 PING 帧(连接级,stream 0,8 字节 opaque 数据)。
+// ack=true 时设置 ACK 标志(即 PONG,原样回显收到的 opaque)。
+func PingFrame(opaque [8]byte, ack bool) []byte {
+	var flags uint8
+	if ack {
+		flags = FlagAck
+	}
+	frame := make([]byte, FrameHeaderLen+8)
+	frame[2] = 8 // length = 8
+	frame[3] = FramePing
+	frame[4] = flags
+	// stream ID = 0(连接级)
+	copy(frame[FrameHeaderLen:], opaque[:])
+	return frame
+}
+
 // HeadersFrame 编码一个 HEADERS 帧。
 func HeadersFrame(streamID uint32, flags uint8, blockFragment []byte) []byte {
 	frame := make([]byte, FrameHeaderLen+len(blockFragment))

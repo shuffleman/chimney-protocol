@@ -23,6 +23,7 @@ package chimney
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -297,8 +298,37 @@ type tunnel struct {
 	streams   map[uint32]chan *streamFrame
 	quit      chan struct{}
 	dead      chan struct{}
+	pong      chan struct{} // 收到 PONG(PING+ACK)时收到信号,供 ping() 探活
+	lastRecv  atomic.Int64  // 最近一次成功读到帧的 unixnano,用于空闲探活
 	closed    bool
 	lastError error // 当 dispatchFrames 因读取错误退出时设置
+}
+
+// ping 在隧道上发送一个 PING 并等待 PONG,用于探测隧道是否存活
+// (独立于后端连接速度)。返回是否在 timeout 内收到 PONG。
+func (t *tunnel) ping(timeout time.Duration) bool {
+	// 清空可能滞留的旧 PONG。
+	select {
+	case <-t.pong:
+	default:
+	}
+	var op [8]byte
+	binary.BigEndian.PutUint64(op[:], uint64(time.Now().UnixNano()))
+	if err := t.h2Eng.WriteRawFrame(h2engine.PingFrame(op, false)); err != nil {
+		return false
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-t.pong:
+		return true
+	case <-t.dead:
+		return false
+	case <-t.quit:
+		return false
+	case <-timer.C:
+		return false
+	}
 }
 
 // LastError 返回导致 dispatchFrames 退出的错误（如有）。
@@ -342,6 +372,15 @@ type Dialer struct {
 // 而非等到下次 DialContext(惰性),从而在网络切换/抖动后秒级自愈。
 const healthCheckInterval = 2500 * time.Millisecond
 
+// pingIdleThreshold 是隧道空闲多久后才发 PING 探活。仅对空闲隧道探活:活跃
+// 隧道有数据帧即证明存活,不必 ping(也避免给所有隧道周期性 PING 形成指纹)。
+// 这与 http2.Transport.ReadIdleTimeout / sing-mux 的做法一致,只是阈值更短以
+// 更快发现切网后"黑洞"的假死隧道。
+const pingIdleThreshold = 5 * time.Second
+
+// pingTimeout 是等待 PONG 的时间;超时即判隧道假死。
+const pingTimeout = 2500 * time.Millisecond
+
 // healthLoop 周期性扫描连接池,立即重建已死的隧道(经宿主 dialer 落到当前网卡)。
 func (d *Dialer) healthLoop() {
 	ticker := time.NewTicker(healthCheckInterval)
@@ -364,7 +403,8 @@ func (d *Dialer) healthLoop() {
 					return
 				default:
 				}
-				d.reviveIfDead(uint32(i))
+				d.reviveIfDead(uint32(i)) // 已死 → 重建
+				d.pingIfIdle(uint32(i))   // 存活但空闲 → PING 探活,假死即拆除
 			}
 		}
 	}
@@ -386,6 +426,30 @@ func (d *Dialer) reviveIfDead(idx uint32) {
 		_, _ = d.ensureTunnel(idx)
 	default:
 		// 存活,保持不动。
+	}
+}
+
+// pingIfIdle 对空闲存活隧道做 PING 探活:无 PONG(假死,如切网黑洞)即主动
+// 拆除,下个健康检查周期由 reviveIfDead 重建。活跃隧道(近期有帧)跳过。
+func (d *Dialer) pingIfIdle(idx uint32) {
+	d.mu.Lock()
+	if d.closed || int(idx) >= len(d.pool) {
+		d.mu.Unlock()
+		return
+	}
+	t := d.pool[idx]
+	d.mu.Unlock()
+
+	select {
+	case <-t.dead:
+		return // 已死,交给 reviveIfDead
+	default:
+	}
+	if time.Since(time.Unix(0, t.lastRecv.Load())) < pingIdleThreshold {
+		return // 近期有活动,无需探活
+	}
+	if !t.ping(pingTimeout) {
+		go t.closeTunnel() // 假死 → 拆除,触发重建
 	}
 }
 
@@ -1369,7 +1433,9 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 		streams:   make(map[uint32]chan *streamFrame),
 		quit:      make(chan struct{}),
 		dead:      make(chan struct{}),
+		pong:      make(chan struct{}, 1),
 	}
+	t.lastRecv.Store(time.Now().UnixNano())
 	if config.MaxTunnelLifetime > 0 {
 		t.expiresAt = t.bornAt.Add(jitterTunnelLifetime(config.MaxTunnelLifetime))
 	}
@@ -1703,9 +1769,11 @@ func (t *tunnel) closeTunnel() error {
 // 这防止 dispatchFrames 在卡住的 Windows TCP 回环连接上永远阻塞。
 const tunnelIdleTimeout = 30 * time.Second
 
-// connectAckTimeout 是等待中继 CONNECT_OK 的应用层超时。正常仅需 ~1 RTT;
-// 超时则判定隧道假死并换路,避免新连接干等底层 TCP 重传超时(~9-15s)。
-const connectAckTimeout = 3 * time.Second
+// connectAckTimeout 是等待中继 CONNECT_OK 的应用层超时(安全网)。
+// 必须 > 中继拨后端的超时(~10s),否则"慢后端"(目标站点连接慢)会被误判为
+// 隧道假死、导致慢站点连不上。真正快速发现假死靠后台 PING 探活(pingIfIdle),
+// 它独立于后端速度,~pingIdleThreshold+pingTimeout 内拆除假死隧道。
+const connectAckTimeout = 12 * time.Second
 
 func (t *tunnel) dispatchFrames() {
 	defer close(t.dead)
@@ -1741,8 +1809,20 @@ func (t *tunnel) dispatchFrames() {
 			t.mu.Unlock()
 			return
 		}
-		// 每次成功接收帧后延长截止时间。
+		// 每次成功接收帧后延长截止时间并记录活动时间。
 		t.rawConn.SetReadDeadline(time.Now().Add(tunnelIdleTimeout))
+		t.lastRecv.Store(time.Now().UnixNano())
+
+		// PONG(PING+ACK)是连接级帧(stream 0),不路由到流,唤醒 ping()。
+		if fh.Type == h2engine.FramePing {
+			if fh.Flags&h2engine.FlagAck != 0 {
+				select {
+				case t.pong <- struct{}{}:
+				default:
+				}
+			}
+			continue
+		}
 
 		t.mu.Lock()
 		ch, ok := t.streams[fh.StreamID]

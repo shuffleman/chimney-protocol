@@ -1612,6 +1612,16 @@ func (s *Server) handleTunnel(h2Eng *h2engine.Engine, logger *slog.Logger) error
 			}
 
 		case h2engine.FrameWindowUpdate:
+		case h2engine.FramePing:
+			// 收到客户端 PING(非 ACK)→ 原样回 PONG,供客户端探测隧道存活。
+			if fh.Flags&h2engine.FlagAck == 0 {
+				var op [8]byte
+				copy(op[:], payload)
+				if err := h2Eng.WriteRawFrame(h2engine.PingFrame(op, true)); err != nil {
+					logger.Debug("ping ack write failed", "error", err)
+					return err
+				}
+			}
 		case h2engine.FrameRSTStream:
 			logger.Debug("RST_STREAM", "stream_id", fh.StreamID)
 			pool.closeStream(fh.StreamID)
