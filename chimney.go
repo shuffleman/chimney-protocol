@@ -155,6 +155,12 @@ type Config struct {
 	// 在内存受限环境(iOS Network Extension ~50MB)下硬性封顶内存:
 	// 内存上限 ≈ MaxConcurrentStreams × 每流缓冲。超限时 DialContext 阻塞等待空位。
 	MaxConcurrentStreams int `yaml:"max_concurrent_streams,omitempty" json:"max_concurrent_streams,omitempty"`
+
+	// DialContext 可选:自定义到中继的 TCP 拨号。设置后用它替代默认
+	// net.DialTimeout —— 传入 sing-box/Xray 等宿主的 interface-aware dialer,
+	// 使连接绑定到正确网卡,并在网络切换(如 iOS WiFi↔蜂窝)时由宿主重绑/
+	// 重拨,从而避免切网断流。不可由 YAML/JSON 配置(运行期注入)。
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error) `yaml:"-" json:"-"`
 }
 
 // DefaultConfig 返回一个填充了库默认值的 Config。
@@ -324,9 +330,63 @@ type Dialer struct {
 	// streamSem 限制同时打开的流数(MaxConcurrentStreams);nil 表示不限。
 	streamSem chan struct{}
 
+	// healthStop 停止后台健康检查 goroutine。
+	healthStop chan struct{}
+
 	prof     *profile.Model
 	dilution *dilution.Provider
 	dialNew  func(Config, *profile.Model, *dilution.Provider) (*tunnel, error)
+}
+
+// healthCheckInterval 是后台健康检查的周期。死链会在此周期内被主动重建,
+// 而非等到下次 DialContext(惰性),从而在网络切换/抖动后秒级自愈。
+const healthCheckInterval = 2500 * time.Millisecond
+
+// healthLoop 周期性扫描连接池,立即重建已死的隧道(经宿主 dialer 落到当前网卡)。
+func (d *Dialer) healthLoop() {
+	ticker := time.NewTicker(healthCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.healthStop:
+			return
+		case <-ticker.C:
+			d.mu.Lock()
+			if d.closed {
+				d.mu.Unlock()
+				return
+			}
+			poolLen := len(d.pool)
+			d.mu.Unlock()
+			for i := 0; i < poolLen; i++ {
+				select {
+				case <-d.healthStop:
+					return
+				default:
+				}
+				d.reviveIfDead(uint32(i))
+			}
+		}
+	}
+}
+
+// reviveIfDead 仅当 pool[idx] 已死时主动重建(存活/空闲轮换的隧道不动)。
+func (d *Dialer) reviveIfDead(idx uint32) {
+	d.mu.Lock()
+	if d.closed || int(idx) >= len(d.pool) {
+		d.mu.Unlock()
+		return
+	}
+	t := d.pool[idx]
+	d.mu.Unlock()
+
+	select {
+	case <-t.dead:
+		// 已死 → 重建(ensureTunnel 内部处理加锁与重新检查)。
+		_, _ = d.ensureTunnel(idx)
+	default:
+		// 存活,保持不动。
+	}
 }
 
 // streamChanBuf 返回每条流接收通道的缓冲深度。
@@ -1096,8 +1156,17 @@ func (d *Dialer) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 
 // newTunnel 建立到中继的单个 H2 隧道连接。
 func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tunnel, error) {
-	// 步骤 1：TCP 连接
-	rawConn, err := net.DialTimeout("tcp", config.RelayAddr, config.ConnectTimeout)
+	// 步骤 1：TCP 连接。优先用宿主注入的 dialer(interface-aware,切网可重绑);
+	// 否则回退到默认 net.DialTimeout。
+	var rawConn net.Conn
+	var err error
+	if config.DialContext != nil {
+		dctx, cancel := context.WithTimeout(context.Background(), config.ConnectTimeout)
+		rawConn, err = config.DialContext(dctx, "tcp", config.RelayAddr)
+		cancel()
+	} else {
+		rawConn, err = net.DialTimeout("tcp", config.RelayAddr, config.ConnectTimeout)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("chimney: connect to relay: %w", err)
 	}
@@ -1361,6 +1430,8 @@ func NewDialer(config Config) (*Dialer, error) {
 	if config.MaxConcurrentStreams > 0 {
 		d.streamSem = make(chan struct{}, config.MaxConcurrentStreams)
 	}
+	d.healthStop = make(chan struct{})
+	go d.healthLoop()
 	return d, nil
 }
 
@@ -1586,6 +1657,9 @@ func (d *Dialer) Close() error {
 	d.closed = true
 	d.mu.Unlock()
 
+	if d.healthStop != nil {
+		close(d.healthStop)
+	}
 	for _, t := range d.pool {
 		t.closeTunnel()
 	}
