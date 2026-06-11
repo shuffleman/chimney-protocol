@@ -294,14 +294,15 @@ type tunnel struct {
 	bornAt    time.Time
 	expiresAt time.Time
 
-	mu        sync.Mutex
-	streams   map[uint32]chan *streamFrame
-	quit      chan struct{}
-	dead      chan struct{}
-	pong      chan struct{} // 收到 PONG(PING+ACK)时收到信号,供 ping() 探活
-	lastRecv  atomic.Int64  // 最近一次成功读到帧的 unixnano,用于空闲探活
-	closed    bool
-	lastError error // 当 dispatchFrames 因读取错误退出时设置
+	mu          sync.Mutex
+	streams     map[uint32]chan *streamFrame
+	quit        chan struct{}
+	dead        chan struct{}
+	pong        chan struct{} // 收到 PONG(PING+ACK)时收到信号,供 ping() 探活
+	lastRecv    atomic.Int64  // 最近一次成功读到帧的 unixnano,用于空闲探活
+	recentBytes atomic.Int64  // 近期收发字节(随健康周期指数衰减),用于负载感知选路
+	closed      bool
+	lastError   error // 当 dispatchFrames 因读取错误退出时设置
 }
 
 // ping 在隧道上发送一个 PING 并等待 PONG,用于探测隧道是否存活
@@ -405,6 +406,7 @@ func (d *Dialer) healthLoop() {
 				}
 				d.reviveIfDead(uint32(i)) // 已死 → 重建
 				d.pingIfIdle(uint32(i))   // 存活但空闲 → PING 探活,假死即拆除
+				d.decayLoad(uint32(i))    // 近期负载指数衰减(用于负载感知选路)
 			}
 		}
 	}
@@ -451,6 +453,43 @@ func (d *Dialer) pingIfIdle(idx uint32) {
 	if !t.ping(pingTimeout) {
 		go t.closeTunnel() // 假死 → 拆除,触发重建
 	}
+}
+
+// decayLoad 对隧道的近期负载计数做指数衰减(每健康周期减半),使一条隧道在
+// 大传输结束后逐步"变闲",重新成为新连接的候选。
+func (d *Dialer) decayLoad(idx uint32) {
+	d.mu.Lock()
+	if d.closed || int(idx) >= len(d.pool) {
+		d.mu.Unlock()
+		return
+	}
+	t := d.pool[idx]
+	d.mu.Unlock()
+	t.recentBytes.Store(t.recentBytes.Load() / 2)
+}
+
+// leastBusyStart 返回近期负载最低的隧道下标,作为 DialContext 轮询的起点,
+// 使新连接(如浏览网页)优先落到不被大传输(下载/上传)占满的隧道上,
+// 缓解 H2-over-TCP 的队头阻塞(参考 sing-mux/mux.cool"大传输别复用"的思路)。
+// 相同负载时用 next 轮转打散,避免总落到同一条。
+func (d *Dialer) leastBusyStart(poolLen int) int {
+	best := int(d.next.Add(1) % uint32(poolLen)) // 轮转基准(用于并列打散)
+	bestLoad := int64(-1)
+	for off := 0; off < poolLen; off++ {
+		idx := (best + off) % poolLen
+		d.mu.Lock()
+		if idx >= len(d.pool) {
+			d.mu.Unlock()
+			continue
+		}
+		load := d.pool[idx].recentBytes.Load()
+		d.mu.Unlock()
+		if bestLoad < 0 || load < bestLoad {
+			bestLoad = load
+			best = idx
+		}
+	}
+	return best
 }
 
 // streamChanBuf 返回每条流接收通道的缓冲深度。
@@ -714,6 +753,7 @@ func (c *streamConn) writeCommandFrame(cmd byte, payload []byte, targetSize uint
 	data[0] = cmd
 	copy(data[1:], payload)
 
+	c.t.recentBytes.Add(int64(len(data))) // 上行负载计入,用于负载感知选路
 	return writeShapedData(c.t.h2Eng, c.streamID, data, targetSize, false)
 }
 
@@ -1615,7 +1655,8 @@ func (d *Dialer) dialPooled(ctx context.Context, addr string) (net.Conn, error) 
 	poolLen := len(d.pool)
 	d.mu.Unlock()
 
-	start := int(d.next.Add(1) % uint32(poolLen))
+	// 从近期负载最低的隧道开始,让新连接避开被大传输占满的隧道(缓解队头阻塞)。
+	start := d.leastBusyStart(poolLen)
 	var lastErr error
 	for attempt := 0; attempt < poolLen; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -1809,9 +1850,10 @@ func (t *tunnel) dispatchFrames() {
 			t.mu.Unlock()
 			return
 		}
-		// 每次成功接收帧后延长截止时间并记录活动时间。
+		// 每次成功接收帧后延长截止时间并记录活动时间/负载。
 		t.rawConn.SetReadDeadline(time.Now().Add(tunnelIdleTimeout))
 		t.lastRecv.Store(time.Now().UnixNano())
+		t.recentBytes.Add(int64(len(payload)))
 
 		// PONG(PING+ACK)是连接级帧(stream 0),不路由到流,唤醒 ping()。
 		if fh.Type == h2engine.FramePing {
