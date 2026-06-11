@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -185,6 +187,67 @@ func TestStreamConnCloseIsIdempotentAndWriteFailsAfterClose(t *testing.T) {
 	}
 	if _, err := c.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("expected net.ErrClosed after Close, got %T %v", err, err)
+	}
+}
+
+func TestStreamConnRemoteCloseReleasesStream(t *testing.T) {
+	tun := &tunnel{
+		streams: make(map[uint32]chan *streamFrame),
+		quit:    make(chan struct{}),
+	}
+	ch := make(chan *streamFrame, 1)
+	tun.streams[1] = ch
+	c := newStreamConn(tun, 1, ch, cmdTCP)
+
+	releases := 0
+	c.onRelease = func() {
+		releases++
+	}
+	ch <- &streamFrame{
+		fh:      &h2engine.FrameHeader{Type: h2engine.FrameData, StreamID: 1},
+		payload: []byte{cmdClose},
+	}
+
+	_, err := c.Read(make([]byte, 1))
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("expected EOF after remote close, got %T %v", err, err)
+	}
+	if _, ok := tun.streams[1]; ok {
+		t.Fatal("stream was not unregistered after remote close")
+	}
+	if releases != 1 {
+		t.Fatalf("release count = %d, want 1", releases)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if releases != 1 {
+		t.Fatalf("release count after second close = %d, want 1", releases)
+	}
+}
+
+func TestPingIfIdleSkipsActiveStreams(t *testing.T) {
+	dead := make(chan struct{})
+	tun := &tunnel{
+		streams:  map[uint32]chan *streamFrame{1: make(chan *streamFrame)},
+		quit:     make(chan struct{}),
+		dead:     dead,
+		lastRecv: atomic.Int64{},
+	}
+	tun.lastRecv.Store(time.Now().Add(-time.Hour).UnixNano())
+	d := &Dialer{pool: []*tunnel{tun}}
+
+	d.pingIfIdle(0)
+
+	select {
+	case <-tun.quit:
+		t.Fatal("active tunnel was closed by idle ping")
+	case <-time.After(20 * time.Millisecond):
+	}
+	select {
+	case <-dead:
+		t.Fatal("active tunnel dispatch loop was marked dead")
+	default:
 	}
 }
 

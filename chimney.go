@@ -447,6 +447,12 @@ func (d *Dialer) pingIfIdle(idx uint32) {
 		return // 已死,交给 reviveIfDead
 	default:
 	}
+	t.mu.Lock()
+	activeStreams := len(t.streams)
+	t.mu.Unlock()
+	if activeStreams > 0 {
+		return // 有活跃流时可能只有上行流量；不要因缺少下行帧误判假死。
+	}
 	if time.Since(time.Unix(0, t.lastRecv.Load())) < pingIdleThreshold {
 		return // 近期有活动,无需探活
 	}
@@ -651,6 +657,7 @@ func (c *streamConn) Read(p []byte) (int, error) {
 		case sf, ok := <-c.ch:
 			stopTimer(timer)
 			if !ok {
+				c.closeWithNotify(false)
 				return 0, io.EOF
 			}
 			if sf.fh.Type == h2engine.FrameData && len(sf.payload) > 0 {
@@ -665,6 +672,7 @@ func (c *streamConn) Read(p []byte) (int, error) {
 					}
 					return n, nil
 				case 0x03: // 关闭
+					c.closeWithNotify(false)
 					return 0, io.EOF
 				default:
 					// 无 chimney 前缀 — 分片写入的续段。
@@ -684,6 +692,7 @@ func (c *streamConn) Read(p []byte) (int, error) {
 			return 0, net.ErrClosed
 		case <-c.t.quit:
 			stopTimer(timer)
+			c.closeWithNotify(false)
 			return 0, io.ErrClosedPipe
 		case <-timerC(timer):
 			return 0, &net.OpError{Op: "read", Net: "chimney", Err: &timeoutError{}}
@@ -836,15 +845,14 @@ func (d *Dialer) LastError() error {
 	return nil
 }
 
-// Close 发送 CLOSE 命令并取消注册流。
-func (c *streamConn) Close() error {
+func (c *streamConn) closeWithNotify(notifyPeer bool) error {
 	var err error
 	c.closeOnce.Do(func() {
 		close(c.closed)
 		if c.onRelease != nil {
 			c.onRelease()
 		}
-		if c.t != nil && c.t.h2Eng != nil {
+		if notifyPeer && c.t != nil && c.t.h2Eng != nil {
 			err = writeShapedData(c.t.h2Eng, c.streamID, []byte{cmdClose}, c.t.stealth.targetSize(c.t.prof), false)
 		}
 		if c.t != nil {
@@ -884,6 +892,11 @@ func (c *streamConn) SetDeadline(t time.Time) error {
 	c.signalReadDeadlineChangedLocked()
 	c.deadlineMu.Unlock()
 	return nil
+}
+
+// Close 发送 CLOSE 命令并取消注册流。
+func (c *streamConn) Close() error {
+	return c.closeWithNotify(true)
 }
 
 func (c *streamConn) SetReadDeadline(t time.Time) error {
@@ -1723,9 +1736,8 @@ func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error)
 		return nil, fmt.Errorf("chimney: CONNECT: %w", err)
 	}
 
-	// CONNECT_OK 应用层超时:假死隧道(底层 TCP 尚未报错,如 iOS 切网后旧连接
-	// 黑洞)不会回 CONNECT_OK。超时即主动判定该隧道不可用并触发重建,使新连接
-	// 在 ~connectAckTimeout 内绕开它,而非干等到 TCP 重传超时(~9-15s)。
+	// CONNECT_OK 应用层超时:只失败当前新流。目标站/DNS/中继后端拨号慢时,
+	// 不能拆掉整条 H2 隧道,否则同隧道上的其它网页流会被连带关闭。
 	ackTimer := time.NewTimer(connectAckTimeout)
 	defer ackTimer.Stop()
 	for {
@@ -1744,8 +1756,8 @@ func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error)
 			t.mu.Lock()
 			delete(t.streams, streamID)
 			t.mu.Unlock()
-			go t.closeTunnel()           // 主动拆除假死隧道 → health-loop/ensureTunnel 重建
-			return nil, io.ErrClosedPipe // isTunnelUnavailable → 上层换下一条隧道
+			_ = t.h2Eng.WriteRawFrame(h2engine.RSTStreamFrame(streamID, h2engine.H2ErrCancel))
+			return nil, fmt.Errorf("chimney: CONNECT ack timeout for %s", addr)
 		case sf, ok := <-ch:
 			if !ok {
 				return nil, net.ErrClosed
