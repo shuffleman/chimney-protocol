@@ -1616,6 +1616,11 @@ func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error)
 		return nil, fmt.Errorf("chimney: CONNECT: %w", err)
 	}
 
+	// CONNECT_OK 应用层超时:假死隧道(底层 TCP 尚未报错,如 iOS 切网后旧连接
+	// 黑洞)不会回 CONNECT_OK。超时即主动判定该隧道不可用并触发重建,使新连接
+	// 在 ~connectAckTimeout 内绕开它,而非干等到 TCP 重传超时(~9-15s)。
+	ackTimer := time.NewTimer(connectAckTimeout)
+	defer ackTimer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -1628,6 +1633,12 @@ func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error)
 			delete(t.streams, streamID)
 			t.mu.Unlock()
 			return nil, net.ErrClosed
+		case <-ackTimer.C:
+			t.mu.Lock()
+			delete(t.streams, streamID)
+			t.mu.Unlock()
+			go t.closeTunnel()           // 主动拆除假死隧道 → health-loop/ensureTunnel 重建
+			return nil, io.ErrClosedPipe // isTunnelUnavailable → 上层换下一条隧道
 		case sf, ok := <-ch:
 			if !ok {
 				return nil, net.ErrClosed
@@ -1676,8 +1687,13 @@ func (t *tunnel) closeTunnel() error {
 	close(t.quit)
 	t.mu.Unlock()
 
-	t.recWriter.Close()
-	err := t.rawConn.Close()
+	if t.recWriter != nil {
+		t.recWriter.Close()
+	}
+	var err error
+	if t.rawConn != nil {
+		err = t.rawConn.Close()
+	}
 	<-t.dead
 	return err
 }
@@ -1686,6 +1702,10 @@ func (t *tunnel) closeTunnel() error {
 // tunnelIdleTimeout 是在未收到任何帧的情况下，隧道被认为已死并拆除前的最大持续时间。
 // 这防止 dispatchFrames 在卡住的 Windows TCP 回环连接上永远阻塞。
 const tunnelIdleTimeout = 30 * time.Second
+
+// connectAckTimeout 是等待中继 CONNECT_OK 的应用层超时。正常仅需 ~1 RTT;
+// 超时则判定隧道假死并换路,避免新连接干等底层 TCP 重传超时(~9-15s)。
+const connectAckTimeout = 3 * time.Second
 
 func (t *tunnel) dispatchFrames() {
 	defer close(t.dead)
