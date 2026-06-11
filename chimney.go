@@ -62,6 +62,9 @@ const (
 	// DefaultTCPBufferSize 是每个隧道默认的 TCP 读写缓冲区大小。
 	DefaultTCPBufferSize = 256 * 1024
 
+	// DefaultStreamChannelBuffer 是每条流接收帧通道的默认缓冲深度。
+	DefaultStreamChannelBuffer = 64
+
 	// DefaultStealthRecordSize 是 stealth 模式的默认 TLS application_data 明文目标大小。
 	DefaultStealthRecordSize = 896
 
@@ -142,6 +145,16 @@ type Config struct {
 	// TCPBufferSize 设置每个隧道连接的 TCP 读写缓冲区大小（字节）（默认：262144 = 256 KiB）。
 	// 在 iOS 等内存受限的平台上，可减少到 65536 以每个隧道节省约 384 KiB 内存。
 	TCPBufferSize int `yaml:"tcp_buffer_size,omitempty" json:"tcp_buffer_size,omitempty"`
+
+	// StreamChannelBuffer 是每条流接收帧通道的缓冲深度（默认：64）。
+	// 高并发下内存 ≈ 并发流数 × 此值 × 帧大小;iOS 等内存受限环境可降到 16~32。
+	// 越大对突发吞吐更友好,越小越省内存。
+	StreamChannelBuffer int `yaml:"stream_channel_buffer,omitempty" json:"stream_channel_buffer,omitempty"`
+
+	// MaxConcurrentStreams 限制整个 Dialer 同时打开的流数（0 = 不限）。
+	// 在内存受限环境(iOS Network Extension ~50MB)下硬性封顶内存:
+	// 内存上限 ≈ MaxConcurrentStreams × 每流缓冲。超限时 DialContext 阻塞等待空位。
+	MaxConcurrentStreams int `yaml:"max_concurrent_streams,omitempty" json:"max_concurrent_streams,omitempty"`
 }
 
 // DefaultConfig 返回一个填充了库默认值的 Config。
@@ -198,6 +211,12 @@ func (c *Config) Normalize() error {
 	}
 	if c.TCPBufferSize <= 0 {
 		c.TCPBufferSize = DefaultTCPBufferSize
+	}
+	if c.StreamChannelBuffer <= 0 {
+		c.StreamChannelBuffer = DefaultStreamChannelBuffer
+	}
+	if c.MaxConcurrentStreams < 0 {
+		c.MaxConcurrentStreams = 0
 	}
 	if c.StealthMode {
 		if c.StealthRecordSize <= 0 {
@@ -264,6 +283,7 @@ type tunnel struct {
 	padTarget int
 	stealth   trafficShaper
 	dilution  *dilution.Provider
+	chanBuf   int // 每条流接收通道的缓冲深度
 	bornAt    time.Time
 	expiresAt time.Time
 
@@ -301,9 +321,20 @@ type Dialer struct {
 	mu     sync.Mutex
 	closed bool
 
+	// streamSem 限制同时打开的流数(MaxConcurrentStreams);nil 表示不限。
+	streamSem chan struct{}
+
 	prof     *profile.Model
 	dilution *dilution.Provider
 	dialNew  func(Config, *profile.Model, *dilution.Provider) (*tunnel, error)
+}
+
+// streamChanBuf 返回每条流接收通道的缓冲深度。
+func (d *Dialer) streamChanBuf() int {
+	if d.config.StreamChannelBuffer > 0 {
+		return d.config.StreamChannelBuffer
+	}
+	return DefaultStreamChannelBuffer
 }
 
 // Diagnostics 返回连接池中所有隧道的诊断信息。
@@ -329,11 +360,11 @@ type streamFrame struct {
 	payload []byte
 }
 
-// writeBufPool 复用最大为 DefaultMaxFrameSize+1 字节的写入缓冲区。
-// 更大的缓冲区将回退到堆分配。
+// writeBufPool 复用 writeBufSize 字节的写入缓冲区(覆盖单个 TCP 分片帧)。
+// 更大的写入(大 UDP 数据报)回退到堆分配。
 var writeBufPool = sync.Pool{
 	New: func() any {
-		buf := make([]byte, 65536+1)
+		buf := make([]byte, writeBufSize)
 		return &buf
 	},
 }
@@ -350,6 +381,7 @@ type streamConn struct {
 
 	closeOnce sync.Once
 	closed    chan struct{}
+	onRelease func() // Close 时调用一次,用于释放 Dialer 的并发流配额
 
 	deadlineMu          sync.Mutex
 	readDeadline        time.Time
@@ -542,10 +574,10 @@ func (c *streamConn) writeCommandFrame(cmd byte, payload []byte, targetSize uint
 
 	needed := 1 + len(payload)
 
-	// 对典型帧大小使用池；超大写入直接分配。
+	// 对典型帧大小使用池；超大写入（大 UDP 数据报）直接分配。
 	var data []byte
 	var poolPtr *[]byte
-	if needed <= 65537 {
+	if needed <= writeBufSize {
 		poolPtr = writeBufPool.Get().(*[]byte)
 		data = (*poolPtr)[:needed]
 	} else {
@@ -645,6 +677,9 @@ func (c *streamConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
 		close(c.closed)
+		if c.onRelease != nil {
+			c.onRelease()
+		}
 		if c.t != nil && c.t.h2Eng != nil {
 			err = writeShapedData(c.t.h2Eng, c.streamID, []byte{cmdClose}, c.t.stealth.targetSize(c.t.prof), false)
 		}
@@ -726,6 +761,12 @@ const (
 	// maxTunnelDataChunk 为 Chimney 隧道命令前缀留出一个字节，
 	// 以便每个 TCP H2 DATA 帧携带其自身的 cmdTCP 字节。
 	maxTunnelDataChunk = 16*1024 - 1
+
+	// writeBufSize 是写缓冲池每块的大小:1 字节命令前缀 + 最大 TCP 分片。
+	// TCP 写路径的 needed = 1+len(payload) 永不超过它;更大的写入(如大 UDP
+	// 数据报)回退到堆分配。此前池块为 64KB,在高并发上传下每条等待写锁的流
+	// 都攥着一块,内存随并发线性膨胀(iOS NE OOM 主因)。
+	writeBufSize = 1 + maxTunnelDataChunk
 )
 
 // UDP 数据报在 DATA 帧载荷中的线格式：
@@ -1010,7 +1051,7 @@ func (d *Dialer) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	poolLen := len(d.pool)
 	d.mu.Unlock()
 
-	ch := make(chan *streamFrame, 256)
+	ch := make(chan *streamFrame, d.streamChanBuf())
 	start := int(d.next.Add(1) % uint32(poolLen))
 	var t *tunnel
 	var streamID uint32
@@ -1241,6 +1282,10 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 		return nil, fmt.Errorf("chimney: clear handshake deadline: %w", err)
 	}
 
+	chanBuf := config.StreamChannelBuffer
+	if chanBuf <= 0 {
+		chanBuf = DefaultStreamChannelBuffer
+	}
 	t := &tunnel{
 		rawConn:   rawTCPConn,
 		h2Eng:     h2Eng,
@@ -1250,6 +1295,7 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 		padTarget: config.PaddingTarget,
 		stealth:   newTrafficShaper(config),
 		dilution:  dil,
+		chanBuf:   chanBuf,
 		bornAt:    time.Now(),
 		streams:   make(map[uint32]chan *streamFrame),
 		quit:      make(chan struct{}),
@@ -1305,13 +1351,17 @@ func NewDialer(config Config) (*Dialer, error) {
 		pool[i] = t
 	}
 
-	return &Dialer{
+	d := &Dialer{
 		config:   config,
 		pool:     pool,
 		prof:     prof,
 		dilution: dil,
 		dialNew:  newTunnel,
-	}, nil
+	}
+	if config.MaxConcurrentStreams > 0 {
+		d.streamSem = make(chan struct{}, config.MaxConcurrentStreams)
+	}
+	return d, nil
 }
 
 // ensureTunnel 返回 pool[idx] 处的隧道，如果现有隧道的调度 goroutine
@@ -1386,8 +1436,48 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 		return nil, fmt.Errorf("chimney: no tunnels available")
 	}
 
-	// 在连接池中轮询分配，自动重连已死的隧道。
-	// 如果一个槽位无法重连，尝试剩余槽位后再将错误返回给调用者（如 sing-box）。
+	// 并发流上限:超限时阻塞等待空位(或 ctx 取消),硬性封顶内存。
+	if d.streamSem != nil {
+		select {
+		case d.streamSem <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	conn, err := d.dialPooled(ctx, addr)
+	if err != nil {
+		d.releaseStreamSlot()
+		return nil, err
+	}
+	// 成功:把配额释放绑定到该流的 Close。
+	if d.streamSem != nil {
+		if sc, ok := conn.(*streamConn); ok {
+			sc.onRelease = d.releaseStreamSlot
+		} else {
+			d.releaseStreamSlot() // 未知连接类型无法追踪,立即释放避免泄漏
+		}
+	}
+	return conn, nil
+}
+
+// releaseStreamSlot 释放一个并发流配额(若启用了上限)。
+func (d *Dialer) releaseStreamSlot() {
+	if d.streamSem != nil {
+		select {
+		case <-d.streamSem:
+		default:
+		}
+	}
+}
+
+// dialPooled 在连接池中轮询分配,自动重连已死的隧道。
+// 如果一个槽位无法重连,尝试剩余槽位后再将错误返回给调用者（如 sing-box）。
+func (d *Dialer) dialPooled(ctx context.Context, addr string) (net.Conn, error) {
+	d.mu.Lock()
+	poolLen := len(d.pool)
+	d.mu.Unlock()
+
 	start := int(d.next.Add(1) % uint32(poolLen))
 	var lastErr error
 	for attempt := 0; attempt < poolLen; attempt++ {
@@ -1431,7 +1521,7 @@ func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error)
 	}
 
 	streamID := t.h2Eng.OpenStream()
-	ch := make(chan *streamFrame, 256)
+	ch := make(chan *streamFrame, t.chanBuf)
 
 	t.mu.Lock()
 	t.streams[streamID] = ch
