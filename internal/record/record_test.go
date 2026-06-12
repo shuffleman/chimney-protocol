@@ -458,6 +458,37 @@ func TestRecordWriterAppliesAndClearsWriteDeadline(t *testing.T) {
 	}
 }
 
+func TestRecordWriterReusesAndReleasesEncodeBuffer(t *testing.T) {
+	codec, err := NewCodec(generateTestKey(t), generateTestNonce(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := &bytes.Buffer{}
+	recWriter := NewRecordWriter(writer, codec)
+
+	if err := recWriter.WriteRecord([]byte("first-record")); err != nil {
+		t.Fatal(err)
+	}
+	if cap(recWriter.buf) == 0 {
+		t.Fatal("expected reusable encode buffer after write")
+	}
+	firstBuf := &recWriter.buf[:1][0]
+
+	if err := recWriter.WriteRecord([]byte("next-record!")); err != nil {
+		t.Fatal(err)
+	}
+	if &recWriter.buf[:1][0] != firstBuf {
+		t.Fatal("expected RecordWriter to reuse encode buffer")
+	}
+
+	if err := recWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if recWriter.buf != nil {
+		t.Fatal("expected Close to release encode buffer")
+	}
+}
+
 func BenchmarkDecodeRecord(b *testing.B) {
 	key := generateTestKey(&testing.T{})
 	nonce := generateTestNonce(&testing.T{})

@@ -869,6 +869,9 @@ func (c *streamConn) closeWithNotify(notifyPeer bool) error {
 			c.t.mu.Lock()
 			delete(c.t.streams, c.streamID)
 			c.t.mu.Unlock()
+			if c.t.h2Eng != nil {
+				c.t.h2Eng.CloseStream(c.streamID)
+			}
 		}
 		c.readMu.Lock()
 		c.readBuf = nil
@@ -1755,6 +1758,7 @@ func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error)
 		t.mu.Lock()
 		delete(t.streams, streamID)
 		t.mu.Unlock()
+		t.h2Eng.CloseStream(streamID)
 		select {
 		case <-t.dead:
 			if lastErr := t.LastError(); lastErr != nil {
@@ -1776,16 +1780,19 @@ func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error)
 			t.mu.Lock()
 			delete(t.streams, streamID)
 			t.mu.Unlock()
+			t.h2Eng.CloseStream(streamID)
 			return nil, ctx.Err()
 		case <-t.quit:
 			t.mu.Lock()
 			delete(t.streams, streamID)
 			t.mu.Unlock()
+			t.h2Eng.CloseStream(streamID)
 			return nil, net.ErrClosed
 		case <-ackTimer.C:
 			t.mu.Lock()
 			delete(t.streams, streamID)
 			t.mu.Unlock()
+			t.h2Eng.CloseStream(streamID)
 			_ = t.h2Eng.WriteRawFrame(h2engine.RSTStreamFrame(streamID, h2engine.H2ErrCancel))
 			return nil, fmt.Errorf("chimney: CONNECT ack timeout for %s", addr)
 		case sf, ok := <-ch:
@@ -1800,6 +1807,7 @@ func (t *tunnel) dialContext(ctx context.Context, addr string) (net.Conn, error)
 					t.mu.Lock()
 					delete(t.streams, streamID)
 					t.mu.Unlock()
+					t.h2Eng.CloseStream(streamID)
 					return nil, fmt.Errorf("chimney: backend connect failed: code 0x%02x", sf.payload[0])
 				}
 			}

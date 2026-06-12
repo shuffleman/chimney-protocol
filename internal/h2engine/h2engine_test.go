@@ -42,6 +42,18 @@ func TestDefaultSettings(t *testing.T) {
 	}
 }
 
+func TestEngineCloseStreamRemovesState(t *testing.T) {
+	e := NewEngine(DefaultSettings(), nil)
+	streamID := e.OpenStream()
+	if got := e.StreamCount(); got != 1 {
+		t.Fatalf("StreamCount after OpenStream = %d, want 1", got)
+	}
+	e.CloseStream(streamID)
+	if got := e.StreamCount(); got != 0 {
+		t.Fatalf("StreamCount after CloseStream = %d, want 0", got)
+	}
+}
+
 func TestSettings_EncodeSettings(t *testing.T) {
 	s := DefaultSettings()
 	frame := s.EncodeSettings(false)

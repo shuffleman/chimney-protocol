@@ -512,6 +512,20 @@ func (e *Engine) OpenStream() uint32 {
 	return streamID
 }
 
+// CloseStream 移除已结束流的状态，避免短连接高 churn 时 streams 表持续增长。
+func (e *Engine) CloseStream(streamID uint32) {
+	e.mu.Lock()
+	delete(e.streams, streamID)
+	e.mu.Unlock()
+}
+
+// StreamCount 返回当前保留的流状态数量，主要用于诊断和测试。
+func (e *Engine) StreamCount() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.streams)
+}
+
 // WriteData 在指定流上将数据写入为 DATA 帧。
 // 数据会根据 MaxFrameSize 自动分片。
 func (e *Engine) WriteData(streamID uint32, data []byte, endStream bool) error {

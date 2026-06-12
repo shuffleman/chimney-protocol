@@ -170,6 +170,28 @@ func TestListenPacketCountsAgainstMaxConcurrentStreams(t *testing.T) {
 	_ = pc2.Close()
 }
 
+func TestClosedStreamsReleaseH2EngineState(t *testing.T) {
+	tun := liveTestTunnel(t, 8)
+	d := &Dialer{
+		config: Config{StreamChannelBuffer: 8},
+		pool:   []*tunnel{tun},
+	}
+
+	for i := 0; i < 1000; i++ {
+		conn, err := d.DialContext(context.Background(), "tcp", "example.com:443")
+		if err != nil {
+			t.Fatalf("DialContext #%d: %v", i, err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatalf("Close #%d: %v", i, err)
+		}
+	}
+
+	if got := tun.h2Eng.StreamCount(); got != 0 {
+		t.Fatalf("h2 stream states after closing short streams = %d, want 0", got)
+	}
+}
+
 func TestUDPConnWriteDeadlinePropagatesToStream(t *testing.T) {
 	u := &udpConn{
 		stream: &streamConn{

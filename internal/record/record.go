@@ -379,7 +379,11 @@ func (c *Codec) EncodeRecordTo(buf, plaintext []byte) []byte {
 
 	ciphertext := c.sealer.Seal(buf[RecordHeaderLen:RecordHeaderLen], plaintext, header)
 
-	return buf[:RecordHeaderLen+len(ciphertext)]
+	record := buf[:RecordHeaderLen+len(ciphertext)]
+	if RecordTraceHook != nil {
+		RecordTraceHook("encode", c.sealer.Sequence()-1, record, c.sealer.keyFP)
+	}
+	return record
 }
 
 // DecodeRecordResult 保存解码记录的结果。
@@ -447,6 +451,7 @@ type RecordWriter struct {
 	codec  *Codec
 	writer io.Writer
 	broken error // set on first write failure, prevents further writes
+	buf    []byte
 }
 
 type writeDeadlineSetter interface {
@@ -494,7 +499,11 @@ func (rw *RecordWriter) WriteRecordWithDeadline(plaintext []byte, deadline time.
 		}
 	}
 
-	record := rw.codec.EncodeRecord(plaintext)
+	needed := RecordHeaderLen + len(plaintext) + rw.codec.sealer.aead.Overhead()
+	if cap(rw.buf) < needed {
+		rw.buf = make([]byte, needed)
+	}
+	record := rw.codec.EncodeRecordTo(rw.buf[:needed], plaintext)
 
 	anyWritten := false
 	for len(record) > 0 {
@@ -514,6 +523,7 @@ func (rw *RecordWriter) WriteRecordWithDeadline(plaintext []byte, deadline time.
 			if !anyWritten {
 				rw.codec.sealer.rollbackSeq()
 			}
+			rw.buf = nil
 			rw.broken = err
 			return err
 		}
@@ -522,8 +532,11 @@ func (rw *RecordWriter) WriteRecordWithDeadline(plaintext []byte, deadline time.
 	return nil
 }
 
-// Close 对于基于互斥锁的 RecordWriter 是无操作。
+// Close 释放 RecordWriter 持有的可复用编码缓冲。
 func (rw *RecordWriter) Close() error {
+	rw.mu.Lock()
+	rw.buf = nil
+	rw.mu.Unlock()
 	return nil
 }
 
