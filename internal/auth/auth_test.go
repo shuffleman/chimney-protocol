@@ -398,6 +398,109 @@ func TestRecordBytesCollector(t *testing.T) {
 	}
 }
 
+func TestUserStore_AllowsKeyHintCollisions(t *testing.T) {
+	// Both IDs have SHA256(id)[:4] == cab7bbc6. A 4-byte hint is an index hint,
+	// not a uniqueness guarantee, so the store must keep both candidates.
+	firstID := "collision-user-35300"
+	secondID := "collision-user-71449"
+
+	store, err := NewUserStoreFromIDs([]string{firstID, secondID}, DefaultTagLen)
+	if err != nil {
+		t.Fatalf("NewUserStoreFromIDs failed: %v", err)
+	}
+	if got := store.Count(); got != 2 {
+		t.Fatalf("Count() = %d, want 2", got)
+	}
+
+	firstHint := store.KeyHint(firstID)
+	secondHint := store.KeyHint(secondID)
+	if firstHint != secondHint {
+		t.Fatalf("test fixture does not collide: %x != %x", firstHint, secondHint)
+	}
+
+	serverRandom := make([]byte, 32)
+	clientRandom := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, serverRandom); err != nil {
+		t.Fatalf("server random: %v", err)
+	}
+	if _, err := io.ReadFull(rand.Reader, clientRandom); err != nil {
+		t.Fatalf("client random: %v", err)
+	}
+
+	firstAuth, err := NewAuthenticator(DerivePSKFromID(firstID), DefaultTagLen)
+	if err != nil {
+		t.Fatalf("first authenticator: %v", err)
+	}
+	firstTag, err := firstAuth.GenerateTag(serverRandom, clientRandom)
+	if err != nil {
+		t.Fatalf("first tag: %v", err)
+	}
+	ok, err := store.VerifyTag(firstHint, serverRandom, clientRandom, firstTag)
+	if err != nil {
+		t.Fatalf("VerifyTag(first) failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("VerifyTag(first) returned false")
+	}
+
+	secondAuth, err := NewAuthenticator(DerivePSKFromID(secondID), DefaultTagLen)
+	if err != nil {
+		t.Fatalf("second authenticator: %v", err)
+	}
+	secondTag, err := secondAuth.GenerateTag(serverRandom, clientRandom)
+	if err != nil {
+		t.Fatalf("second tag: %v", err)
+	}
+	ok, err = store.VerifyTag(secondHint, serverRandom, clientRandom, secondTag)
+	if err != nil {
+		t.Fatalf("VerifyTag(second) failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("VerifyTag(second) returned false")
+	}
+}
+
+func TestUserStore_RemoveCollisionKeepsOtherUser(t *testing.T) {
+	firstID := "collision-user-35300"
+	secondID := "collision-user-71449"
+
+	store, err := NewUserStoreFromIDs([]string{firstID, secondID}, DefaultTagLen)
+	if err != nil {
+		t.Fatalf("NewUserStoreFromIDs failed: %v", err)
+	}
+	if err := store.RemoveUserByID(firstID); err != nil {
+		t.Fatalf("RemoveUserByID(first) failed: %v", err)
+	}
+	if got := store.Count(); got != 1 {
+		t.Fatalf("Count() after remove = %d, want 1", got)
+	}
+
+	serverRandom := make([]byte, 32)
+	clientRandom := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, serverRandom); err != nil {
+		t.Fatalf("server random: %v", err)
+	}
+	if _, err := io.ReadFull(rand.Reader, clientRandom); err != nil {
+		t.Fatalf("client random: %v", err)
+	}
+
+	auth, err := NewAuthenticator(DerivePSKFromID(secondID), DefaultTagLen)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	tag, err := auth.GenerateTag(serverRandom, clientRandom)
+	if err != nil {
+		t.Fatalf("tag: %v", err)
+	}
+	ok, err := store.VerifyTag(store.KeyHint(secondID), serverRandom, clientRandom, tag)
+	if err != nil {
+		t.Fatalf("VerifyTag(second) failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("VerifyTag(second) returned false after removing colliding user")
+	}
+}
+
 func BenchmarkGenerateTag(b *testing.B) {
 	psk := make([]byte, 32)
 	rand.Reader.Read(psk)

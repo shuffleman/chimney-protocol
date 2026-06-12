@@ -365,10 +365,11 @@ type UserEntry struct {
 }
 
 // UserStore 管理多用户的认证，每个用户通过从其用户 ID 派生的
-// 4 字节提示标识。中继使用来自认证帧的提示来查找正确的 PSK 以进行标签验证。
+// 4 字节提示标识。提示只用于缩小候选集合；大用户量部署下允许同一 hint
+// 命中多个用户，最终仍通过认证标签确认具体密钥。
 type UserStore struct {
 	mu     sync.RWMutex
-	byHint map[[4]byte]*UserEntry
+	byHint map[[4]byte][]*UserEntry
 	tagLen int
 }
 
@@ -383,7 +384,7 @@ func NewUserStore(users map[string]string, tagLen int) (*UserStore, error) {
 	}
 
 	store := &UserStore{
-		byHint: make(map[[4]byte]*UserEntry, len(users)),
+		byHint: make(map[[4]byte][]*UserEntry, len(users)),
 		tagLen: tagLen,
 	}
 
@@ -396,13 +397,10 @@ func NewUserStore(users map[string]string, tagLen int) (*UserStore, error) {
 			return nil, fmt.Errorf("auth: invalid PSK length for user %q: got %d bytes, want %d", userID, len(psk), keyderiv.DefaultKeyLen)
 		}
 		hint := keyderiv.ComputeKeyHint(userID)
-		if _, exists := store.byHint[hint]; exists {
-			return nil, fmt.Errorf("auth: key hint collision for user %q (hint %x already taken)", userID, hint)
-		}
-		store.byHint[hint] = &UserEntry{
+		store.byHint[hint] = append(store.byHint[hint], &UserEntry{
 			UserID:  userID,
 			Deriver: keyderiv.NewDeriver(psk),
-		}
+		})
 	}
 
 	return store, nil
@@ -438,9 +436,9 @@ func (s *UserStore) TagLen() int {
 	return s.tagLen
 }
 
-// lookup 返回给定提示的条目，如果不存在则返回 nil。
+// lookup 返回给定提示的候选条目，如果不存在则返回 nil。
 // 调用者必须持有 s.mu（读锁或写锁）。
-func (s *UserStore) lookup(hint [4]byte) *UserEntry {
+func (s *UserStore) lookup(hint [4]byte) []*UserEntry {
 	return s.byHint[hint]
 }
 
@@ -449,8 +447,8 @@ func (s *UserStore) GenerateTag(hint [4]byte, serverRandom, recordBytes []byte) 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	entry := s.lookup(hint)
-	if entry == nil {
+	entries := s.lookup(hint)
+	if len(entries) == 0 {
 		return nil, fmt.Errorf("auth: unknown key hint %x", hint)
 	}
 	if len(serverRandom) != 32 {
@@ -459,7 +457,7 @@ func (s *UserStore) GenerateTag(hint [4]byte, serverRandom, recordBytes []byte) 
 	if len(recordBytes) == 0 {
 		return nil, ErrRecordBytesEmpty
 	}
-	return entry.Deriver.AuthTag(serverRandom, recordBytes, s.tagLen)
+	return entries[0].Deriver.AuthTag(serverRandom, recordBytes, s.tagLen)
 }
 
 // VerifyTag 验证由 hint 标识的用户的认证标签。
@@ -467,19 +465,28 @@ func (s *UserStore) VerifyTag(hint [4]byte, serverRandom, recordBytes, tag []byt
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	entry := s.lookup(hint)
-	if entry == nil {
+	entries := s.lookup(hint)
+	if len(entries) == 0 {
 		return false, fmt.Errorf("auth: unknown key hint %x", hint)
 	}
 	if len(tag) != s.tagLen {
 		return false, fmt.Errorf("auth: tag length mismatch: got %d, want %d", len(tag), s.tagLen)
 	}
-	return entry.Deriver.VerifyAuthTag(serverRandom, recordBytes, tag)
+	for _, entry := range entries {
+		ok, err := entry.Deriver.VerifyAuthTag(serverRandom, recordBytes, tag)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // AddUser 在运行时添加或替换用户。线程安全。
 // 如果 pskHex 为空，PSK 派生为 SHA256(userID)。
-// 如果具有相同 hint 的用户已存在，则替换。
+// 如果同一 userID 已存在，则替换；相同 hint 的其他用户会保留在候选桶中。
 func (s *UserStore) AddUser(userID, pskHex string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -496,10 +503,19 @@ func (s *UserStore) AddUser(userID, pskHex string) error {
 	}
 
 	hint := keyderiv.ComputeKeyHint(userID)
-	s.byHint[hint] = &UserEntry{
+	entry := &UserEntry{
 		UserID:  userID,
 		Deriver: keyderiv.NewDeriver(psk),
 	}
+	entries := s.byHint[hint]
+	for i, existing := range entries {
+		if existing.UserID == userID {
+			entries[i] = entry
+			s.byHint[hint] = entries
+			return nil
+		}
+	}
+	s.byHint[hint] = append(entries, entry)
 	return nil
 }
 
@@ -510,11 +526,23 @@ func (s *UserStore) RemoveUserByID(userID string) error {
 	defer s.mu.Unlock()
 
 	hint := keyderiv.ComputeKeyHint(userID)
-	if _, ok := s.byHint[hint]; !ok {
+	entries := s.byHint[hint]
+	for i, entry := range entries {
+		if entry.UserID != userID {
+			continue
+		}
+		entries = append(entries[:i], entries[i+1:]...)
+		if len(entries) == 0 {
+			delete(s.byHint, hint)
+		} else {
+			s.byHint[hint] = entries
+		}
+		return nil
+	}
+	if len(entries) == 0 {
 		return fmt.Errorf("auth: user %q not found (hint %x)", userID, hint)
 	}
-	delete(s.byHint, hint)
-	return nil
+	return fmt.Errorf("auth: user %q not found in hint bucket %x", userID, hint)
 }
 
 // ListUserIDs 返回所有当前注册的用户标识符。线程安全。
@@ -522,9 +550,11 @@ func (s *UserStore) ListUserIDs() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	ids := make([]string, 0, len(s.byHint))
-	for _, entry := range s.byHint {
-		ids = append(ids, entry.UserID)
+	ids := make([]string, 0, s.countLocked())
+	for _, entries := range s.byHint {
+		for _, entry := range entries {
+			ids = append(ids, entry.UserID)
+		}
 	}
 	return ids
 }
@@ -534,9 +564,11 @@ func (s *UserStore) ListUserIDs() []string {
 func (s *UserStore) GetAllDerivers() []*keyderiv.Deriver {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	derivers := make([]*keyderiv.Deriver, 0, len(s.byHint))
-	for _, entry := range s.byHint {
-		derivers = append(derivers, entry.Deriver)
+	derivers := make([]*keyderiv.Deriver, 0, s.countLocked())
+	for _, entries := range s.byHint {
+		for _, entry := range entries {
+			derivers = append(derivers, entry.Deriver)
+		}
 	}
 	return derivers
 }
@@ -545,7 +577,16 @@ func (s *UserStore) GetAllDerivers() []*keyderiv.Deriver {
 func (s *UserStore) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.byHint)
+	return s.countLocked()
+}
+
+// countLocked 返回注册用户数。调用者必须持有 s.mu。
+func (s *UserStore) countLocked() int {
+	count := 0
+	for _, entries := range s.byHint {
+		count += len(entries)
+	}
+	return count
 }
 
 // ExtractKeyHint 从认证帧负载中提取 4 字节密钥提示。
