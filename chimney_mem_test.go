@@ -2,7 +2,9 @@ package chimney
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -134,5 +136,57 @@ func TestMaxConcurrentStreamsCaps(t *testing.T) {
 	defer cancel4()
 	if _, err := d.DialContext(ctx4, "tcp", "c:3"); err != nil {
 		t.Fatalf("dial after freeing a slot should succeed: %v", err)
+	}
+}
+
+func TestListenPacketCountsAgainstMaxConcurrentStreams(t *testing.T) {
+	d := &Dialer{
+		config:    Config{StreamChannelBuffer: 8, MaxConcurrentStreams: 1},
+		pool:      []*tunnel{liveTestTunnel(t, 8)},
+		streamSem: make(chan struct{}, 1),
+	}
+
+	pc1, err := d.ListenPacket(context.Background())
+	if err != nil {
+		t.Fatalf("first ListenPacket failed: %v", err)
+	}
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel2()
+	if _, err := d.ListenPacket(ctx2); err == nil {
+		t.Fatal("second ListenPacket should block on stream limit, but succeeded")
+	}
+
+	if err := pc1.Close(); err != nil {
+		t.Fatalf("close first PacketConn: %v", err)
+	}
+
+	ctx3, cancel3 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel3()
+	pc2, err := d.ListenPacket(ctx3)
+	if err != nil {
+		t.Fatalf("ListenPacket after freeing a slot should succeed: %v", err)
+	}
+	_ = pc2.Close()
+}
+
+func TestUDPConnWriteDeadlinePropagatesToStream(t *testing.T) {
+	u := &udpConn{
+		stream: &streamConn{
+			t:  &tunnel{quit: make(chan struct{})},
+			ch: make(chan *streamFrame),
+		},
+	}
+	if err := u.SetWriteDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := u.WriteTo([]byte("query"), &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 53})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("expected net timeout error, got %T %v", err, err)
 	}
 }

@@ -591,10 +591,14 @@ func (s trafficShaper) targetSize(prof *profile.Model) uint16 {
 }
 
 func writeShapedData(e *h2engine.Engine, streamID uint32, data []byte, targetSize uint16, endStream bool) error {
+	return writeShapedDataWithDeadline(e, streamID, data, targetSize, endStream, time.Time{})
+}
+
+func writeShapedDataWithDeadline(e *h2engine.Engine, streamID uint32, data []byte, targetSize uint16, endStream bool, deadline time.Time) error {
 	if targetSize > 0 {
-		return e.WritePaddedRecord(streamID, data, targetSize, endStream)
+		return e.WritePaddedRecordWithDeadline(streamID, data, targetSize, endStream, deadline)
 	}
-	return e.WriteData(streamID, data, endStream)
+	return e.WriteDataWithDeadline(streamID, data, endStream, deadline)
 }
 
 func jitterTunnelLifetime(base time.Duration) time.Duration {
@@ -740,7 +744,8 @@ func (c *streamConn) Write(p []byte) (int, error) {
 }
 
 func (c *streamConn) writeCommandFrame(cmd byte, payload []byte, targetSize uint16) error {
-	if expired := c.prepareWriteDeadline(); expired {
+	deadline, expired := c.writeDeadlineState()
+	if expired {
 		return &net.OpError{Op: "write", Net: "chimney", Err: &timeoutError{}}
 	}
 
@@ -763,7 +768,7 @@ func (c *streamConn) writeCommandFrame(cmd byte, payload []byte, targetSize uint
 	copy(data[1:], payload)
 
 	c.t.recentBytes.Add(int64(len(data))) // 上行负载计入,用于负载感知选路
-	return writeShapedData(c.t.h2Eng, c.streamID, data, targetSize, false)
+	return writeShapedDataWithDeadline(c.t.h2Eng, c.streamID, data, targetSize, false, deadline)
 }
 
 func (c *streamConn) readDeadlineState() (time.Time, <-chan struct{}) {
@@ -808,17 +813,22 @@ func stopTimer(timer *time.Timer) {
 }
 
 func (c *streamConn) prepareWriteDeadline() bool {
+	_, expired := c.writeDeadlineState()
+	return expired
+}
+
+func (c *streamConn) writeDeadlineState() (time.Time, bool) {
 	c.deadlineMu.Lock()
 	deadline := c.writeDeadline
 	c.deadlineMu.Unlock()
 
 	if deadline.IsZero() {
-		return false
+		return time.Time{}, false
 	}
 	if time.Until(deadline) <= 0 {
-		return true
+		return deadline, true
 	}
-	return false
+	return deadline, false
 }
 
 // IsDead 在所有隧道的调度 goroutine 都已退出时返回 true，
@@ -1168,7 +1178,7 @@ func (u *udpConn) SetDeadline(t time.Time) error {
 	u.readDeadline = t
 	u.writeDeadline = t
 	u.signalReadDeadlineChangedLocked()
-	return nil
+	return u.stream.SetDeadline(t)
 }
 
 func (u *udpConn) SetReadDeadline(t time.Time) error {
@@ -1176,14 +1186,14 @@ func (u *udpConn) SetReadDeadline(t time.Time) error {
 	defer u.mu.Unlock()
 	u.readDeadline = t
 	u.signalReadDeadlineChangedLocked()
-	return nil
+	return u.stream.SetReadDeadline(t)
 }
 
 func (u *udpConn) SetWriteDeadline(t time.Time) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.writeDeadline = t
-	return nil
+	return u.stream.SetWriteDeadline(t)
 }
 
 func (u *udpConn) readDeadlineChangedChan() <-chan struct{} {
@@ -1228,6 +1238,21 @@ func (d *Dialer) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	poolLen := len(d.pool)
 	d.mu.Unlock()
 
+	slotAcquired := false
+	if d.streamSem != nil {
+		select {
+		case d.streamSem <- struct{}{}:
+			slotAcquired = true
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	defer func() {
+		if slotAcquired {
+			d.releaseStreamSlot()
+		}
+	}()
+
 	ch := make(chan *streamFrame, d.streamChanBuf())
 	start := int(d.next.Add(1) % uint32(poolLen))
 	var t *tunnel
@@ -1264,10 +1289,15 @@ func (d *Dialer) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	t.streams[streamID] = ch
 	t.mu.Unlock()
 
+	stream := newStreamConn(t, streamID, ch, cmdUDP)
+	if slotAcquired {
+		stream.onRelease = d.releaseStreamSlot
+		slotAcquired = false
+	}
 	return &udpConn{
 		d:      d,
 		t:      t,
-		stream: newStreamConn(t, streamID, ch, cmdUDP),
+		stream: stream,
 	}, nil
 }
 

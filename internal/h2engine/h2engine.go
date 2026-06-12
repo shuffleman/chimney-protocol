@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/shuffleman/chimney-protocol/internal/record"
 )
@@ -514,6 +515,11 @@ func (e *Engine) OpenStream() uint32 {
 // WriteData 在指定流上将数据写入为 DATA 帧。
 // 数据会根据 MaxFrameSize 自动分片。
 func (e *Engine) WriteData(streamID uint32, data []byte, endStream bool) error {
+	return e.WriteDataWithDeadline(streamID, data, endStream, time.Time{})
+}
+
+// WriteDataWithDeadline 与 WriteData 相同，但会把写截止时间传递到记录层。
+func (e *Engine) WriteDataWithDeadline(streamID uint32, data []byte, endStream bool, deadline time.Time) error {
 	e.mu.Lock()
 	stream, exists := e.streams[streamID]
 	if !exists {
@@ -551,7 +557,7 @@ func (e *Engine) WriteData(streamID uint32, data []byte, endStream bool) error {
 		}
 
 		frame := DataFrame(streamID, flags, data[offset:offset+chunkSize])
-		if err := e.recordWriter.WriteRecord(frame); err != nil {
+		if err := e.recordWriter.WriteRecordWithDeadline(frame, deadline); err != nil {
 			return fmt.Errorf("h2engine: failed to write DATA frame: %w", err)
 		}
 
@@ -585,6 +591,11 @@ func (e *Engine) WriteRawFrame(frame []byte) error {
 //
 // 中继节点静默丢弃 PaddingStreamID 上的帧。
 func (e *Engine) WritePaddedRecord(streamID uint32, data []byte, targetSize uint16, endStream bool) error {
+	return e.WritePaddedRecordWithDeadline(streamID, data, targetSize, endStream, time.Time{})
+}
+
+// WritePaddedRecordWithDeadline 与 WritePaddedRecord 相同，但会把写截止时间传递到记录层。
+func (e *Engine) WritePaddedRecordWithDeadline(streamID uint32, data []byte, targetSize uint16, endStream bool, deadline time.Time) error {
 	if e.recordWriter == nil {
 		return errors.New("h2engine: record writer not set")
 	}
@@ -597,14 +608,14 @@ func (e *Engine) WritePaddedRecord(streamID uint32, data []byte, targetSize uint
 
 	if len(tunnelFrame) >= int(targetSize) {
 		// 隧道数据自身已达到目标大小——无需填充
-		return e.recordWriter.WriteRecord(tunnelFrame)
+		return e.recordWriter.WriteRecordWithDeadline(tunnelFrame, deadline)
 	}
 
 	// 构建填充帧以达到目标大小
 	padLen := int(targetSize) - len(tunnelFrame) - FrameHeaderLen
 	if padLen <= 0 {
 		// 没有足够的空间用于有意义的填充帧；按原样发送隧道数据
-		return e.recordWriter.WriteRecord(tunnelFrame)
+		return e.recordWriter.WriteRecordWithDeadline(tunnelFrame, deadline)
 	}
 
 	paddingPayload := make([]byte, padLen)
@@ -615,7 +626,7 @@ func (e *Engine) WritePaddedRecord(streamID uint32, data []byte, targetSize uint
 	copy(combined, tunnelFrame)
 	copy(combined[len(tunnelFrame):], paddingFrame)
 
-	return e.recordWriter.WriteRecord(combined)
+	return e.recordWriter.WriteRecordWithDeadline(combined, deadline)
 }
 
 // WritePadding 发送一个独立的填充记录，填充至 targetSize。

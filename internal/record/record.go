@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
 
 // DebugTracer 是一个包级钩子，用于捕获每次密封/打开操作。
@@ -448,6 +449,10 @@ type RecordWriter struct {
 	broken error // set on first write failure, prevents further writes
 }
 
+type writeDeadlineSetter interface {
+	SetWriteDeadline(time.Time) error
+}
+
 // NewRecordWriter 创建一个 RecordWriter。
 func NewRecordWriter(w io.Writer, codec *Codec) *RecordWriter {
 	return &RecordWriter{
@@ -465,11 +470,28 @@ func NewRecordWriter(w io.Writer, codec *Codec) *RecordWriter {
 // 规避回环 TCP 驱动中的错误，该错误中跨跃超过
 // 2 个内存页（> 8192 字节）的写入会从第 2 页开始传递损坏的字节。
 func (rw *RecordWriter) WriteRecord(plaintext []byte) error {
+	return rw.WriteRecordWithDeadline(plaintext, time.Time{})
+}
+
+// WriteRecordWithDeadline 与 WriteRecord 相同，但在底层 writer 支持
+// SetWriteDeadline 时，仅在本次串行写入期间应用写截止时间。
+func (rw *RecordWriter) WriteRecordWithDeadline(plaintext []byte, deadline time.Time) error {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
 
 	if rw.broken != nil {
 		return rw.broken
+	}
+
+	if !deadline.IsZero() {
+		if writer, ok := rw.writer.(writeDeadlineSetter); ok {
+			if err := writer.SetWriteDeadline(deadline); err != nil {
+				return err
+			}
+			defer func() {
+				_ = writer.SetWriteDeadline(time.Time{})
+			}()
+		}
 	}
 
 	record := rw.codec.EncodeRecord(plaintext)

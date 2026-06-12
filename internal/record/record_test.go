@@ -6,7 +6,18 @@ import (
 	"fmt"
 	"io"
 	"testing"
+	"time"
 )
+
+type deadlineCaptureWriter struct {
+	bytes.Buffer
+	deadlines []time.Time
+}
+
+func (w *deadlineCaptureWriter) SetWriteDeadline(t time.Time) error {
+	w.deadlines = append(w.deadlines, t)
+	return nil
+}
 
 func generateTestKey(t *testing.T) []byte {
 	key := make([]byte, 16) // AES-128
@@ -421,6 +432,29 @@ func TestRecordWriter_PipeStress(t *testing.T) {
 	case err := <-errCh:
 		t.Fatal(err)
 	default:
+	}
+}
+
+func TestRecordWriterAppliesAndClearsWriteDeadline(t *testing.T) {
+	codec, err := NewCodec(generateTestKey(t), generateTestNonce(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := &deadlineCaptureWriter{}
+	recWriter := NewRecordWriter(writer, codec)
+	deadline := time.Now().Add(time.Second)
+
+	if err := recWriter.WriteRecordWithDeadline([]byte("record"), deadline); err != nil {
+		t.Fatal(err)
+	}
+	if len(writer.deadlines) != 2 {
+		t.Fatalf("deadline calls = %d, want 2", len(writer.deadlines))
+	}
+	if !writer.deadlines[0].Equal(deadline) {
+		t.Fatalf("first deadline = %v, want %v", writer.deadlines[0], deadline)
+	}
+	if !writer.deadlines[1].IsZero() {
+		t.Fatalf("second deadline = %v, want zero", writer.deadlines[1])
 	}
 }
 
