@@ -461,6 +461,7 @@ func (c *Client) establishTunnel() (net.Conn, error) {
 			return nil, fmt.Errorf("create record codec: %w", err)
 		}
 	}
+	codec.WithKeyHint(keyHint)
 
 	// 第 6 步：切换到 ChimneyRecord 前，从 TCP 缓冲区排干陈旧字节。
 	// 中继在握手期间转发了所有服务器→客户端的数据，包括

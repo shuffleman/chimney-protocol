@@ -6,13 +6,14 @@
 //	    uint8   type    = 0x17;     // 应用数据
 //	    uint16  version = 0x0303;   // TLS 1.2 遗留版本
 //	    uint16  length;
-//	    opaque  payload[length];    // = AEAD_seal(K_sess, nonce, inner_chunk)
+//	    opaque  payload[length];    // = optional key_hint || AEAD_seal(K_sess, nonce, inner_chunk)
 //	}
 //
 // inner_chunk 解密后得到 H2 帧字节流。
 package record
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -38,6 +39,10 @@ const (
 	// 记录头部大小。
 	RecordHeaderLen = 5 // type(1) + version(2) + length(2)
 
+	// KeyHintLen 是多用户模式下放在 application_data 负载开头的明文 hint 长度。
+	// 它仍处于 TLS application_data 内部，外部抓包只会看到一段普通应用数据。
+	KeyHintLen = 4
+
 	// 用于 application_data 的 TLS 记录类型。
 	RecordTypeApplicationData = 0x17
 
@@ -52,8 +57,8 @@ const (
 	// 必须 >= 最大 H2 帧大小（FrameHeaderLen + MaxFrameSize = 9 + 65536 = 65545）。
 	MaxPlaintextLen = 66000
 
-	// MaxRecordLen 是线上的最大记录大小（5 + 66000 + 16 ≈ 66 KiB）。
-	MaxRecordLen = RecordHeaderLen + MaxPlaintextLen + AESGCMTagSize
+	// MaxRecordLen 是线上的最大记录大小（5 + 4 + 66000 + 16 ≈ 66 KiB）。
+	MaxRecordLen = RecordHeaderLen + KeyHintLen + MaxPlaintextLen + AESGCMTagSize
 
 	// MaxBufSize 限制了 RecordReader 内部缓冲区的上限，防止读取器停滞或攻击者发送不完整记录时
 	// 导致无限制增长。
@@ -293,8 +298,17 @@ func (o *Opener) Sequence() uint64 {
 
 // Codec 提供 ChimeyRecords 的编码/解码组合功能。
 type Codec struct {
-	sealer *Sealer
-	opener *Opener
+	sealer  *Sealer
+	opener  *Opener
+	keyHint *[KeyHintLen]byte
+}
+
+// WithKeyHint returns c after enabling the clear key hint prefix on encoded
+// and decoded records. The hint is intentionally outside AEAD ciphertext so a
+// multi-user relay can select a small candidate bucket before decryption.
+func (c *Codec) WithKeyHint(hint [KeyHintLen]byte) *Codec {
+	c.keyHint = &hint
+	return c
 }
 
 // SealerSeq 返回当前密封器的序列号。
@@ -352,14 +366,18 @@ func (c *Codec) EncodeRecord(plaintext []byte) []byte {
 	// 在 TLS 1.3 中，附加数据包含带有实际密文长度的头部。
 	// 所以我们这样做：用占位长度密封，然后填入真实长度。
 	// 实际上，根据 TLS 1.3 规范，附加数据就是带有密文长度的记录头部。
-	binary.BigEndian.PutUint16(header[3:5], uint16(len(plaintext)+c.sealer.aead.Overhead()))
+	prefixLen := c.keyHintLen()
+	binary.BigEndian.PutUint16(header[3:5], uint16(prefixLen+len(plaintext)+c.sealer.aead.Overhead()))
 
 	ciphertext := c.sealer.Seal(nil, plaintext, header)
 
 	// 最终记录 = 头部 || 密文
-	record := make([]byte, RecordHeaderLen+len(ciphertext))
+	record := make([]byte, RecordHeaderLen+prefixLen+len(ciphertext))
 	copy(record, header)
-	copy(record[RecordHeaderLen:], ciphertext)
+	if c.keyHint != nil {
+		copy(record[RecordHeaderLen:RecordHeaderLen+KeyHintLen], c.keyHint[:])
+	}
+	copy(record[RecordHeaderLen+prefixLen:], ciphertext)
 
 	if RecordTraceHook != nil {
 		RecordTraceHook("encode", c.sealer.Sequence()-1, record, c.sealer.keyFP)
@@ -375,15 +393,26 @@ func (c *Codec) EncodeRecordTo(buf, plaintext []byte) []byte {
 	header[0] = RecordTypeApplicationData
 	header[1] = byte(RecordVersionTLS12 >> 8)
 	header[2] = byte(RecordVersionTLS12 & 0xFF)
-	binary.BigEndian.PutUint16(header[3:5], uint16(len(plaintext)+c.sealer.aead.Overhead()))
+	prefixLen := c.keyHintLen()
+	binary.BigEndian.PutUint16(header[3:5], uint16(prefixLen+len(plaintext)+c.sealer.aead.Overhead()))
 
-	ciphertext := c.sealer.Seal(buf[RecordHeaderLen:RecordHeaderLen], plaintext, header)
+	if c.keyHint != nil {
+		copy(buf[RecordHeaderLen:RecordHeaderLen+KeyHintLen], c.keyHint[:])
+	}
+	ciphertext := c.sealer.Seal(buf[RecordHeaderLen+prefixLen:RecordHeaderLen+prefixLen], plaintext, header)
 
-	record := buf[:RecordHeaderLen+len(ciphertext)]
+	record := buf[:RecordHeaderLen+prefixLen+len(ciphertext)]
 	if RecordTraceHook != nil {
 		RecordTraceHook("encode", c.sealer.Sequence()-1, record, c.sealer.keyFP)
 	}
 	return record
+}
+
+func (c *Codec) keyHintLen() int {
+	if c.keyHint == nil {
+		return 0
+	}
+	return KeyHintLen
 }
 
 // DecodeRecordResult 保存解码记录的结果。
@@ -421,7 +450,17 @@ func (c *Codec) DecodeRecord(data []byte) (*DecodeRecordResult, error) {
 	}
 
 	header := data[:RecordHeaderLen]
-	ciphertext := data[RecordHeaderLen : RecordHeaderLen+length]
+	prefixLen := c.keyHintLen()
+	if int(length) < prefixLen+c.opener.aead.Overhead() {
+		return nil, ErrRecordTooShort
+	}
+	if c.keyHint != nil {
+		wireHint := data[RecordHeaderLen : RecordHeaderLen+KeyHintLen]
+		if !bytes.Equal(wireHint, c.keyHint[:]) {
+			return nil, ErrBadRecordMAC
+		}
+	}
+	ciphertext := data[RecordHeaderLen+prefixLen : RecordHeaderLen+length]
 
 	if RecordTraceHook != nil {
 		rec := data[:RecordHeaderLen+int(length)]
@@ -499,7 +538,7 @@ func (rw *RecordWriter) WriteRecordWithDeadline(plaintext []byte, deadline time.
 		}
 	}
 
-	needed := RecordHeaderLen + len(plaintext) + rw.codec.sealer.aead.Overhead()
+	needed := RecordHeaderLen + rw.codec.keyHintLen() + len(plaintext) + rw.codec.sealer.aead.Overhead()
 	if cap(rw.buf) < needed {
 		rw.buf = make([]byte, needed)
 	}

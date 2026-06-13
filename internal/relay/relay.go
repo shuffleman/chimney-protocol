@@ -726,18 +726,10 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 		return fmt.Errorf("no derivers available (PSK empty and no users)")
 	}
 
-	// 扫描 firstAppData 寻找有效的 ChimneyRecord，尝试每个派生器。
-	// uTLS 可能在 ChimneyRecord 之前发送了握手后的 0x17 记录，
-	// 因此我们遍历 TLS 记录并逐个测试。
 	var chimneyRecord, preludeRecords []byte
 	var matchedDeriver *keyderiv.Deriver
-	for _, d := range allDerivers {
-		chimneyRecord, preludeRecords = findChimneyRecord(firstAppData, d, serverRandom, clientRandom, logger)
-		if chimneyRecord != nil {
-			matchedDeriver = d
-			break
-		}
-	}
+	var matchedHint *[record.KeyHintLen]byte
+	chimneyRecord, preludeRecords, matchedDeriver, matchedHint = s.findChimneyRecordFast(firstAppData, allDerivers, serverRandom, clientRandom, logger)
 
 	// 若尚未找到，ChimneyRecord 可能还未到达
 	//（客户端有自己的 drain+encode 过程，之后才写入）。
@@ -750,13 +742,7 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 			n, rdErr := clientConn.Read(readBuf)
 			if n > 0 {
 				firstAppData = append(firstAppData, readBuf[:n]...)
-				for _, d := range allDerivers {
-					chimneyRecord, preludeRecords = findChimneyRecord(firstAppData, d, serverRandom, clientRandom, logger)
-					if chimneyRecord != nil {
-						matchedDeriver = d
-						break
-					}
-				}
+				chimneyRecord, preludeRecords, matchedDeriver, matchedHint = s.findChimneyRecordFast(firstAppData, allDerivers, serverRandom, clientRandom, logger)
 			}
 			if rdErr != nil {
 				break
@@ -809,6 +795,9 @@ func (s *Server) performSwap(clientConn, siteConn net.Conn, sni string, serverRa
 		if err != nil {
 			return fmt.Errorf("create codec: %w", err)
 		}
+	}
+	if matchedHint != nil {
+		codec.WithKeyHint(*matchedHint)
 	}
 
 	// 包装 clientConn，从第一个 chimney record 开始重放所有数据。
@@ -1827,13 +1816,63 @@ func extractSNI(handshakeMsg []byte) string {
 	return ""
 }
 
+func (s *Server) findChimneyRecordFast(data []byte, fallbackDerivers []*keyderiv.Deriver, serverRandom, clientRandom []byte, logger *slog.Logger) (chimneyRecord, preludeRecords []byte, matchedDeriver *keyderiv.Deriver, matchedHint *[record.KeyHintLen]byte) {
+	if s.userStore != nil {
+		if hint, ok := firstKnownRecordHint(data, s.userStore); ok {
+			candidates := s.userStore.GetDeriversByHint(hint)
+			if len(candidates) > 0 {
+				chimneyRecord, preludeRecords, matchedDeriver = findChimneyRecordWithDerivers(data, candidates, &hint, serverRandom, clientRandom, logger)
+				if chimneyRecord != nil {
+					return chimneyRecord, preludeRecords, matchedDeriver, &hint
+				}
+				logger.Debug("hinted ChimneyRecord scan missed, falling back to legacy full scan",
+					"hint", fmt.Sprintf("%x", hint),
+					"candidates", len(candidates))
+			}
+		}
+	}
+
+	chimneyRecord, preludeRecords, matchedDeriver = findChimneyRecordWithDerivers(data, fallbackDerivers, nil, serverRandom, clientRandom, logger)
+	return chimneyRecord, preludeRecords, matchedDeriver, nil
+}
+
+func firstKnownRecordHint(data []byte, store *auth.UserStore) ([record.KeyHintLen]byte, bool) {
+	for len(data) >= record.RecordHeaderLen {
+		recType := data[0]
+		recLen := int(data[3])<<8 | int(data[4])
+		total := record.RecordHeaderLen + recLen
+		if len(data) < total {
+			break
+		}
+		if recType == record.RecordTypeApplicationData && recLen >= record.KeyHintLen {
+			var hint [record.KeyHintLen]byte
+			copy(hint[:], data[record.RecordHeaderLen:record.RecordHeaderLen+record.KeyHintLen])
+			if len(store.GetDeriversByHint(hint)) > 0 {
+				return hint, true
+			}
+		}
+		data = data[total:]
+	}
+	return [record.KeyHintLen]byte{}, false
+}
+
+func findChimneyRecordWithDerivers(data []byte, derivers []*keyderiv.Deriver, hint *[record.KeyHintLen]byte, serverRandom, clientRandom []byte, logger *slog.Logger) (chimneyRecord, preludeRecords []byte, matchedDeriver *keyderiv.Deriver) {
+	for _, d := range derivers {
+		chimneyRecord, preludeRecords = findChimneyRecord(data, d, hint, serverRandom, clientRandom, logger)
+		if chimneyRecord != nil {
+			return chimneyRecord, preludeRecords, d
+		}
+	}
+	return nil, preludeRecords, nil
+}
+
 // findChimneyRecord 扫描拼接的 TLS 记录缓冲区，寻找有效的
 // ChimneyRecord。它遍历每个 TLS 记录，对于每个 0x17
 // （application_data）记录，创建一个新的编解码器并尝试解密。
 // 第一个成功解密的记录作为 chimneyRecord 返回。
 // 它之前的所有记录（包括非 Chimney 的 0x17 记录，如 uTLS
 // 握手后的记录）作为 preludeRecords 返回，用于转发到真实站点。
-func findChimneyRecord(data []byte, deriver *keyderiv.Deriver, serverRandom, clientRandom []byte, logger *slog.Logger) (chimneyRecord, preludeRecords []byte) {
+func findChimneyRecord(data []byte, deriver *keyderiv.Deriver, hint *[record.KeyHintLen]byte, serverRandom, clientRandom []byte, logger *slog.Logger) (chimneyRecord, preludeRecords []byte) {
 	scanned := 0
 	for len(data) >= record.RecordHeaderLen {
 		recType := data[0]
@@ -1857,6 +1896,9 @@ func findChimneyRecord(data []byte, deriver *keyderiv.Deriver, serverRandom, cli
 				data = data[total:]
 				scanned++
 				continue
+			}
+			if hint != nil {
+				testCodec.WithKeyHint(*hint)
 			}
 
 			recordData := make([]byte, total)

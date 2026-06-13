@@ -1437,6 +1437,7 @@ func newTunnel(config Config, prof *profile.Model, dil *dilution.Provider) (*tun
 			return nil, fmt.Errorf("chimney: create codec: %w", err)
 		}
 	}
+	codec.WithKeyHint(keyHint)
 
 	// 步骤 4：提取原始 TCP 连接用于记录层。
 	// 交换后，Chimney 记录编解码器直接在 TCP 流上操作 —
@@ -1560,16 +1561,29 @@ func NewDialer(config Config) (*Dialer, error) {
 	}
 
 	pool := make([]*tunnel, config.PoolSize)
+	errCh := make(chan error, config.PoolSize)
+	var wg sync.WaitGroup
 	for i := 0; i < config.PoolSize; i++ {
-		t, err := newTunnel(config, prof, dil)
-		if err != nil {
-			// 部分失败时关闭已创建的隧道。
-			for j := 0; j < i; j++ {
-				pool[j].closeTunnel()
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			t, err := newTunnel(config, prof, dil)
+			if err != nil {
+				errCh <- err
+				return
 			}
-			return nil, err
+			pool[idx] = t
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	if err := <-errCh; err != nil {
+		for _, t := range pool {
+			if t != nil {
+				t.closeTunnel()
+			}
 		}
-		pool[i] = t
+		return nil, err
 	}
 
 	d := &Dialer{

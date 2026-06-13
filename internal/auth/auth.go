@@ -573,6 +573,21 @@ func (s *UserStore) GetAllDerivers() []*keyderiv.Deriver {
 	return derivers
 }
 
+// GetDeriversByHint returns only the candidate derivers for a key hint.
+// The returned slice is detached from the store bucket so callers can iterate
+// without holding the store lock.
+func (s *UserStore) GetDeriversByHint(hint [4]byte) []*keyderiv.Deriver {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries := s.lookup(hint)
+	derivers := make([]*keyderiv.Deriver, 0, len(entries))
+	for _, entry := range entries {
+		derivers = append(derivers, entry.Deriver)
+	}
+	return derivers
+}
+
 // Count 返回注册用户数。线程安全。
 func (s *UserStore) Count() int {
 	s.mu.RLock()

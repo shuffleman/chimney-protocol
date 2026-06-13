@@ -181,6 +181,46 @@ func TestCodec_DirectionalKeys(t *testing.T) {
 	}
 }
 
+func TestCodec_KeyHintPrefix(t *testing.T) {
+	key := generateTestKey(t)
+	nonce := generateTestNonce(t)
+	hint := [KeyHintLen]byte{0x12, 0x34, 0x56, 0x78}
+
+	encoder, err := NewCodec(key, nonce)
+	if err != nil {
+		t.Fatalf("NewCodec failed: %v", err)
+	}
+	decoder, err := NewCodec(key, nonce)
+	if err != nil {
+		t.Fatalf("NewCodec failed: %v", err)
+	}
+	encoder.WithKeyHint(hint)
+	decoder.WithKeyHint(hint)
+
+	plaintext := []byte("hinted record")
+	record := encoder.EncodeRecord(plaintext)
+	if !bytes.Equal(record[RecordHeaderLen:RecordHeaderLen+KeyHintLen], hint[:]) {
+		t.Fatalf("record hint = %x, want %x", record[RecordHeaderLen:RecordHeaderLen+KeyHintLen], hint)
+	}
+
+	result, err := decoder.DecodeRecord(record)
+	if err != nil {
+		t.Fatalf("DecodeRecord failed: %v", err)
+	}
+	if !bytes.Equal(result.Plaintext, plaintext) {
+		t.Fatalf("decoded plaintext = %q, want %q", result.Plaintext, plaintext)
+	}
+
+	wrongDecoder, err := NewCodec(key, nonce)
+	if err != nil {
+		t.Fatalf("NewCodec failed: %v", err)
+	}
+	wrongDecoder.WithKeyHint([KeyHintLen]byte{0xde, 0xad, 0xbe, 0xef})
+	if _, err := wrongDecoder.DecodeRecord(record); err == nil {
+		t.Fatal("expected wrong hint to fail")
+	}
+}
+
 func TestDecodeRecord_TooShort(t *testing.T) {
 	key := generateTestKey(t)
 	nonce := generateTestNonce(t)
