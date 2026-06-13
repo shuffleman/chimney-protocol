@@ -137,6 +137,20 @@ entries:
 	}
 }
 
+func TestParseIntentJSON_CompactAllowList(t *testing.T) {
+	il, err := ParseIntentJSON([]byte(`{"allow":["www.cloudflare.com","API.Account.Samsung.com"]}`))
+	if err != nil {
+		t.Fatalf("ParseIntentJSON failed: %v", err)
+	}
+
+	if !il.Contains("www.cloudflare.com") {
+		t.Error("Missing www.cloudflare.com")
+	}
+	if !il.Contains("api.account.samsung.com") {
+		t.Error("Missing normalized api.account.samsung.com")
+	}
+}
+
 func TestNewEnforceLayer(t *testing.T) {
 	el := NewEnforceLayer()
 	if el == nil {
@@ -249,6 +263,20 @@ entries:
 	}
 }
 
+func TestParseEnforceJSON_CompactAllowList(t *testing.T) {
+	el, err := ParseEnforceJSON([]byte(`{"allow":["0.0.0.0/0","::/0"]}`))
+	if err != nil {
+		t.Fatalf("ParseEnforceJSON failed: %v", err)
+	}
+
+	if !el.ContainsString("8.8.8.8") {
+		t.Error("Should contain IPv4 address")
+	}
+	if !el.ContainsString("2606:4700:4700::1111") {
+		t.Error("Should contain IPv6 address")
+	}
+}
+
 func TestManager_CheckDestination(t *testing.T) {
 	intent := NewIntentLayer()
 	intent.Add(IntentEntry{SNI: "allowed.com"})
@@ -304,6 +332,20 @@ func TestManager_CheckIP(t *testing.T) {
 
 	if err := mgr.CheckIP("192.168.1.1"); err == nil {
 		t.Error("Expected error for blocked IP")
+	}
+}
+
+func TestLoadManagerFromContent_CompactAllowLists(t *testing.T) {
+	mgr, err := LoadManagerFromContent(
+		[]byte(`{"allow":["www.cloudflare.com"]}`),
+		[]byte(`{"allow":["0.0.0.0/0","::/0"]}`),
+	)
+	if err != nil {
+		t.Fatalf("LoadManagerFromContent failed: %v", err)
+	}
+
+	if err := mgr.CheckDestination("www.cloudflare.com", "104.16.123.96"); err != nil {
+		t.Fatalf("CheckDestination failed: %v", err)
 	}
 }
 

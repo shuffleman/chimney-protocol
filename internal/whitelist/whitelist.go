@@ -120,6 +120,21 @@ func parseIntentData(data []byte, unmarshal func([]byte, interface{}) error) (*I
 	if err := unmarshal(data, intent); err != nil {
 		return nil, fmt.Errorf("whitelist: failed to parse intent: %w", err)
 	}
+	var compact struct {
+		Allow []string `yaml:"allow" json:"allow"`
+	}
+	if len(intent.Entries) == 0 {
+		if err := unmarshal(data, &compact); err != nil {
+			return nil, fmt.Errorf("whitelist: failed to parse intent allow list: %w", err)
+		}
+		for _, sni := range compact.Allow {
+			sni = strings.ToLower(strings.TrimSpace(sni))
+			if sni == "" {
+				continue
+			}
+			intent.Entries[sni] = IntentEntry{SNI: sni}
+		}
+	}
 
 	// 将 SNI 规范化为小写
 	normalized := make(map[string]IntentEntry, len(intent.Entries))
@@ -268,6 +283,26 @@ func parseEnforceData(data []byte, unmarshal func([]byte, interface{}) error) (*
 	enforce := NewEnforceLayer()
 	if err := unmarshal(data, enforce); err != nil {
 		return nil, fmt.Errorf("whitelist: failed to parse enforce: %w", err)
+	}
+	var compact struct {
+		Allow []string `yaml:"allow" json:"allow"`
+	}
+	if len(enforce.Entries) == 0 {
+		if err := unmarshal(data, &compact); err != nil {
+			return nil, fmt.Errorf("whitelist: failed to parse enforce allow list: %w", err)
+		}
+		for _, cidr := range compact.Allow {
+			cidr = strings.TrimSpace(cidr)
+			if cidr == "" {
+				continue
+			}
+			enforce.Entries = append(enforce.Entries, EnforceEntry{
+				CIDR:        cidr,
+				Provider:    "inline",
+				Region:      "any",
+				Description: "inline allow list",
+			})
+		}
 	}
 
 	if err := enforce.parseCIDRs(); err != nil {
